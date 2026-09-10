@@ -1,0 +1,85 @@
+// FinOpsExpr: one grammar, two entry rules, one shared resolver -- a
+// metric means exactly one thing whether a human typed it or a model did.
+// Function arity/legality (e.g. "SUM(utilisation) is illegal") is enforced
+// by the resolver, not baked into the grammar shape.
+
+?start: query
+      | expr
+
+// ---------------------------------------------------------------------
+// entry 1 -- driver expression: heads * available_hours * utilisation ...
+// ---------------------------------------------------------------------
+?expr: expr "+" term      -> add
+     | expr "-" term      -> sub
+     | term
+
+?term: term "*" factor    -> mul
+     | term "/" factor    -> div
+     | factor
+
+?factor: unary "^" factor -> pow
+       | unary
+
+?unary: "-" primary       -> neg
+      | primary
+
+?primary: NUMBER           -> number
+        | call
+        | IDENT            -> ident
+        | "(" expr ")"
+
+call: FUNC_NAME "(" [call_args] ")"
+call_args: call_arg ("," call_arg)*
+?call_arg: expr
+         | pred
+
+// ---------------------------------------------------------------------
+// shared predicate grammar -- used by query's WHERE and by an in-expr
+// WHERE(x, pred) call
+// ---------------------------------------------------------------------
+?pred: pred "AND" and_operand   -> pred_and
+     | pred "OR" and_operand    -> pred_or
+     | and_operand
+?and_operand: comparison
+            | "(" pred ")"
+comparison: IDENT COMP_OP literal              -> comparison_binary
+          | IDENT "IN" "(" literal_list ")"     -> comparison_in
+          | IDENT "NOT" "IN" "(" literal_list ")" -> comparison_not_in
+literal_list: literal ("," literal)*
+?literal: NUMBER  -> number
+        | STRING  -> string
+
+// ---------------------------------------------------------------------
+// entry 2 -- query: what an agent emits, never SQL
+// ---------------------------------------------------------------------
+query: "SELECT" measure_list \
+       by_clause? \
+       where_clause? \
+       period_clause? \
+       asof_clause? \
+       compare_clause? \
+       bridge_clause? \
+       limit_clause?
+
+measure_list: expr ("," expr)*
+by_clause: "BY" IDENT ("," IDENT)*
+where_clause: "WHERE" pred
+period_clause: "FOR" "PERIOD" period_range
+period_range: PERIOD_TOKEN (".." PERIOD_TOKEN)?
+asof_clause: "AS" "OF" (STRING | NUMBER)
+compare_clause: "COMPARE" "PLAN" plan_ref ("," scenario_ref)? "TO" "ACTUAL"
+plan_ref: "pv" "=" STRING
+scenario_ref: "scenario" "=" STRING
+bridge_clause: "BRIDGE"
+limit_clause: "LIMIT" NUMBER
+
+FUNC_NAME.2: "PRIOR" | "LEAD" | "YOY" | "CAGR" | "YTD" | "QTD" | "MTD" | "ROLLING"
+         | "BY" | "WHERE" | "SUM" | "AVG" | "MIN" | "MAX" | "ABS" | "ROUND"
+COMP_OP: "!=" | "="
+PERIOD_TOKEN.2: /\d{4}-(Q[1-4]|H[1-2]|\d{2})/
+IDENT: /[A-Za-z_][A-Za-z0-9_]*/
+NUMBER: /\d+(\.\d+)?/
+STRING: /'[^']*'/ | /"[^"]*"/
+
+%import common.WS
+%ignore WS
