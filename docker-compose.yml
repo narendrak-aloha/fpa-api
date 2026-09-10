@@ -31,9 +31,65 @@ services:
       POSTGRES_PASSWORD: fpa
       POSTGRES_DB: fpa
     ports:
-      - "5432:5432"
+      - "5431:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fpa"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  commitment:
+    build: ./services/commitment
+    container_name: fpa-commitment
+    ports:
+      - "8001:8001"
+    environment:
+      COMMITMENT_FAILURE_RATE: ${COMMITMENT_FAILURE_RATE:-0.0}
+
+  api:
+    build: .
+    container_name: fpa-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:fpa@postgres:5432/fpa
+      CLICKHOUSE_HOST: clickhouse
+      TEMPORAL_HOST: temporal:7233
+      COMMITMENT_SERVICE_URL: http://commitment:8001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
+      temporal:
+        condition: service_started
+      commitment:
+        condition: service_started
+
+  temporal-worker:
+    build: .
+    container_name: fpa-temporal-worker
+    command: ["python", "worker.py"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:fpa@postgres:5432/fpa
+      CLICKHOUSE_HOST: clickhouse
+      TEMPORAL_HOST: temporal:7233
+      COMMITMENT_SERVICE_URL: http://commitment:8001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
+      temporal:
+        condition: service_started
+      commitment:
+        condition: service_started
 
 volumes:
   clickhouse_data:

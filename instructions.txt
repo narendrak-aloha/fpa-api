@@ -1,0 +1,694 @@
+Rewritten the phases based on the Added Guradrailles
+
+
+Yes. I would change the phases slightly, but I would not redesign the whole plan.
+The previous 19-phase plan was structurally correct. The newly identified assignment requirements mainly mean we should strengthen existing phases and add a couple of explicit validation/documentation phases, rather than create many new phases.
+The assignment itself emphasizes six build steps and says the evaluator will run the system from a clean machine and test the guarantees end-to-end.
+Revised phase plan
+Phase
+Previous
+Change
+Why
+0
+Repo / assignment discovery
+Keep + strengthen
+Must explicitly preserve seed_fpa.py, understand clean-machine startup, and make the first Git commit.
+1
+Environment / data
+Expand
+Add exact registry, dimensions, measures, DAG, vintages, and seeded-data constraints.
+2
+PostgreSQL governance
+Expand
+Add variance-report state, escalation, Investigating, and human-only close.
+3
+FinOpsExpr
+Expand
+Explicitly implement typed measures, aggregation rules, utilisation vs realisation, and query grammar.
+4
+SQL compiler / authorization
+Keep + strengthen
+This remains the security boundary for all DB access.
+5
+ClickHouse
+Expand slightly
+Make vintage resolution and reproducibility explicit.
+6
+Variance bridge
+Major expansion
+Add interaction convention, non-zero-leg validation, nested mix, and exact quantity identity.
+7
+Bridge validation
+Expand
+Add property-based tests + rollup tests + materiality escalation.
+8
+Temporal recompute
+Keep + strengthen
+Add explicit second-shock policy and compensation policy.
+9
+Durable approval
+Keep
+Make distinction between Temporal approval and Postgres approval explicit.
+10
+Commitment Service
+Expand slightly
+Explicitly test keyed/unkeyed POST and 500/timeout failure.
+11
+Agno Team
+Expand
+Add data-drift detection and authenticated/traced HTTP boundary.
+12
+Agno guardrails
+Expand
+Make Agno classes/hooks/dependencies/HITL structural requirements explicit.
+13
+PII gate
+Keep
+Already covered well.
+14
+Vue UI
+Keep + constrain
+Explicitly treat the five required screens/features as the target and don't overbuild.
+15
+Acceptance tests
+Expand
+Mirror the exact evaluator sequence from Assignment.html.
+16
+Failure / adversarial tests
+Keep
+Scope, injection, PII, classification failure, etc.
+17
+Determinism / replay tests
+Keep
+Temporal replay + duplicate recompute + worker kill.
+18
+Documentation / README
+NEW explicit phase
+Assignment has concrete README requirements.
+19
+Demo / video
+NEW explicit phase
+Assignment has a very specific 10–15 minute demo.
+20
+Final clean-machine acceptance
+NEW explicit final gate
+Evaluator clones repo and follows README from nothing.
+
+So I'd go from 19 → 21 phases, but importantly, several are expanded rather than completely new.
+
+Phase 0 — Repository & Assignment Contract
+Add
+Before writing code:
+Read ASSIGNMENT.html.
+Read existing README.md.
+Inspect existing source.
+Understand seed_fpa.py.
+Do not modify seeded data unless assignment explicitly permits it.
+Understand required stack.
+Make the first Git commit before implementation.
+Why?
+The evaluator starts from your repository and follows your instructions. The assignment explicitly says they will clone the repo and run it on a clean machine.
+This phase becomes our baseline.
+
+Phase 1 — Environment + Data Contract
+Previously we treated this mostly as environment/data discovery.
+Now explicitly establish:
+PostgreSQL
+    ↓
+Governance / Plan Spine
+    ↓
+ClickHouse
+    ↓
+Analytics / Fact Ledger
+And document:
+dimensions;
+measures;
+aggregation types;
+planning model;
+calc_order_dag;
+ledger vintages;
+plan/actual data;
+intercompany pairs;
+seeded row counts.
+Why?
+The DSL and compiler depend on the registry. The bridge depends on the grain. The agent depends on available metrics/dimensions.
+If we don't establish this first, later phases become guesswork.
+
+Phase 2 — PostgreSQL Plan Spine
+This phase becomes broader.
+Implement:
+Draft
+   ↓
+In-Review
+   ↓
+Approved
+   ↓
+Locked
+   ↓
+Superseded
+Also:
+second-user approval;
+self-approval rejection;
+covenant breach blocks approval;
+locked version cannot be edited;
+even direct psql edit must fail;
+derivation trace required;
+scenario = driver override, not duplicated plan;
+version chain;
+field-level permissions;
+concurrent edit protection;
+tamper-evident audit;
+audit verifier;
+append-only disclosure/audit records.
+New addition: variance report state
+We should also explicitly model:
+Open
+  ↓
+Investigating
+  ↓
+Closed
+with:
+agent may move it to Investigating;
+only human may close;
+materiality breach causes escalation.
+Why?
+This is directly tested/required by the assignment, and our previous phase focused primarily on plan state rather than the variance report lifecycle.
+
+Phase 3 — FinOpsExpr
+This phase needs a more precise definition.
+Build:
+expr
+query
+with:
+English
+   ↓
+DSL
+   ↓
+AST
+Implement:
+shared metric resolver;
+dimension resolver;
+typed measures;
+aggregation rules;
+time functions;
+BY;
+WHERE;
+FOR PERIOD;
+AS OF;
+COMPARE PLAN TO ACTUAL;
+BRIDGE;
+LIMIT;
+scenario handling.
+Important new point
+Explicitly distinguish:
+utilisation
+realisation
+The assignment specifically calls out that they are different multipliers/leakages.
+Also:
+SUM(utilisation)
+must be rejected if the registry says utilisation is not additive.
+Why?
+The assignment is testing whether we've built an actual query language/type system rather than string templating.
+
+Phase 4 — SQL Compiler + Security Boundary
+No major structural change.
+Keep:
+DSL
+ ↓
+parse
+ ↓
+AST
+ ↓
+typecheck
+ ↓
+authorize
+ ↓
+scope injection
+ ↓
+period predicate
+ ↓
+parameterized SQL
+ ↓
+ClickHouse
+Hard rule:
+Agent → SQL ❌
+Agent → DSL → Compiler → SQL → DB ✅
+Also enforce:
+unknown metric rejection;
+unknown dimension rejection;
+invalid aggregation;
+invalid formula;
+cycles;
+scope widening;
+query cost;
+no silent fallback.
+Why?
+This is the central hard-guarantee boundary.
+
+Phase 5 — ClickHouse Analytics
+Add explicit vintage behavior:
+AS OF timestamp
+       ↓
+dim_ledger_vintage
+       ↓
+correct ledger vintage
+Without AS OF:
+current vintage
+Every bridge/report result must identify its vintage.
+Also demonstrate partition pruning.
+Why?
+The assignment explicitly tests:
+Ask Poland Q2 again AS OF July close and get a different correct answer.
+So vintage isn't just a database detail; it is part of the user-visible answer.
+
+Phase 6 — Variance Bridge
+This is the phase I would strengthen the most.
+Implement revenue:
+Price
+Volume
+Practice Mix
+Grade-within-Practice Mix
+FX
+Cost:
+Rate
+Efficiency
+And:
+PLAN
+ ↓
+VOLUME
+ ↓
+MIX
+ ↓
+PRICE
+ ↓
+OPERATING ACTUAL
+ ↓
+FX
+ ↓
+REPORTED ACTUAL
+Add the missing interaction decision
+We must choose one:
+Option A — Sequential
+Volume → Mix → Price → FX
+or
+Option B — Symmetric interaction allocation
+Then document the choice.
+Add:
+volume + mix = total quantity variance
+at every rollup level.
+Add:
+nested practice/grade mix;
+plan-rate operational components;
+real-rate FX;
+residual;
+fixed tolerance;
+no rounding-away residual;
+materiality escalation;
+all Poland Q2 legs materially non-zero.
+Why?
+This is actually one of the most important interview questions in the assignment. The assignment explicitly says the sequential order changes the decomposition and expects you to defend your chosen convention and test it.
+So our previous plan wasn't wrong, but it wasn't explicit enough about interaction allocation.
+
+Phase 7 — Bridge Validation
+Add three classes of tests.
+1. Identity tests
+PLAN + bridge components = ACTUAL
+2. Rollup tests
+Root
+ ├── Country
+ │    ├── Practice
+ │    └── Grade
+Every level must reconcile.
+3. Property tests
+Generate random plan/actual combinations and verify the identity.
+Why?
+The assignment explicitly requires a property test, not just one hardcoded Poland test.
+
+Phase 8 — Temporal Recompute
+Keep the original requirements:
+deterministic;
+activities;
+idempotency;
+stable keys;
+heartbeats;
+checkpoints;
+dirty set;
+child workflows;
+retries;
+cancellation;
+progress;
+compensation;
+locked-only publish.
+Add explicit design decisions:
+Mid-run shock
+Choose:
+REJECT
+or
+FOLD INTO CURRENT RUN
+and document why.
+Approval timeout
+Choose:
+ESCALATE
+or
+EXPIRE
+and document why.
+Why?
+The assignment deliberately leaves these choices open and expects you to defend them.
+
+Phase 9 — Human Approval Architecture
+Keep Temporal approval, but explicitly document the three mechanisms:
+Mechanism
+Purpose
+Agno HITL
+Agent/tool confirmation
+PostgreSQL approval
+Governance / plan authorization
+Temporal signal
+Durable workflow waiting
+
+Why?
+This distinction is explicitly requested by the assignment.
+This should also go into README.
+
+Phase 10 — Commitment Service
+Implement exactly:
+POST /commitments
+DELETE /commitments/{id}
+POST:
+Idempotency-Key
+Test:
+same key twice
+    ↓
+same result
+no duplicate
+and:
+no key twice
+    ↓
+two operations
+Failure simulation:
+0%
+50%
+100%
+including:
+500
+timeout
+Why?
+The assignment isn't simply checking whether we built an API. It is checking whether Temporal handles a bad external dependency correctly.
+
+Phase 11 — Agno Team
+Expand this phase.
+Build actual:
+Team(...)
+with a leader.
+Choose:
+coordinate
+route
+tasks
+and defend the choice.
+Don't use:
+broadcast
+without a very strong reason.
+Add:
+stable member IDs;
+scope propagation;
+member-level guardrails;
+token measurement;
+latency measurement;
+comparison against single agent.
+New capability
+The team must also:
+detect vintage/data drift
+        ↓
+raise drift flag
+        ↓
+cannot suppress it
+Why?
+This was one of the points we underrepresented previously. The assignment explicitly defines data correctness detection as an agent capability.
+
+Phase 12 — Agno Guardrails
+Keep the previous guardrails but make their implementation location explicit.
+Required structure
+pre_hooks
+   ├── PII guardrail
+   └── injection guardrail
+
+tool
+   ↓
+compiler
+
+post-hook
+   ↓
+number/citation validation
+Security context:
+authenticated caller
+       ↓
+dependencies
+       ↓
+agent/team/member
+Not:
+prompt → "You are only allowed PL"
+Also:
+output_schema;
+bounded retry;
+tool_call_limit;
+HITL;
+authenticated HTTP;
+tracing.
+Why?
+The assignment explicitly says prompt instructions are not a control and wants actual Agno framework mechanisms.
+
+Phase 13 — PII / Masking Gate
+No major change.
+Keep exact pipeline:
+Resolve scope
+ ↓
+Fetch through compiler
+ ↓
+Classify
+ ↓
+Mask/generalize/tokenize
+ ↓
+Write disclosure log
+ ↓
+Send to model
+Failure anywhere:
+BLOCK
+And:
+payload hash
+not payload in disclosure log.
+
+Phase 14 — Vue Interface
+Keep it deliberately small.
+Exactly these five things:
+DSL beside answer
+Bridge waterfall + residual
+Drill-through to cube rows + vintage
+Live Temporal progress
+Approve / Reject / Lock
+Why?
+The assignment explicitly says they don't care about the framework or CSS and recommends only half a day for the interface.
+So do not let frontend work consume time from the bridge.
+
+Phase 15 — Exact Acceptance Test Suite
+This should now mirror the assignment's evaluator sequence.
+For example:
+1. Start clean stack
+2. Seed
+3. Create plan
+4. Self approve → FAIL
+5. Second user approve → PASS
+6. Lock
+7. Edit locked → FAIL
+8. psql edit → FAIL
+9. Tamper audit → verifier FAIL
+10. Malformed formula → FAIL
+11. Cyclic DAG → FAIL
+12. SUM(utilisation) → type error
+13. Poland Q2 question
+14. July AS OF question
+15. PII disclosure check
+16. Fourth entity → FAIL
+17. Prompt injection via customer name → FAIL
+18. Kill Temporal worker
+19. Restart
+20. Approval while worker dead
+21. Duplicate recompute
+22. Commitment 100% failure
+23. Bridge reconciliation
+Why?
+This is much better than a generic test checklist because it mirrors exactly what the evaluator says they will do.
+
+Phase 16 — Adversarial / Security Tests
+Explicitly test:
+scope escalation
+member direct invocation
+prompt injection in cube data
+PII classification failure
+PII masking failure
+unsupported number
+unknown metric
+unknown dimension
+illegal aggregation
+SQL bypass attempt
+Why?
+These are where the architecture proves that security is model-independent.
+
+Phase 17 — Temporal Determinism / Replay
+Explicitly prove:
+same inputs
+   ↓
+same workflow
+   ↓
+same output
+Test:
+duplicate run;
+worker kill;
+restart;
+replay against committed history;
+no duplicate rows;
+no duplicate commitments.
+The assignment calls the replay test the mechanical proof of workflow determinism.
+
+Phase 18 — README / Architecture Documentation ⭐ NEW
+This should become a formal phase.
+README must contain:
+1. Video link
+2. How to run from nothing
+3. Architecture
+4. Read path
+5. Write path
+6. Service boundaries
+7. PostgreSQL vs application enforcement
+8. Temporal vs Agno boundary
+9. Design decisions
+10. Trade-offs
+11. What is unfinished
+12. What is simplified
+13. What would be done with 2 more weeks
+Why?
+The assignment explicitly requires these, so README isn't just setup documentation. It is part of the deliverable.
+
+Phase 19 — Demo / Video ⭐ NEW
+Prepare a 10–15 minute video.
+The demo should show:
+Architecture
+    ↓
+English question
+    ↓
+DSL
+    ↓
+Recompute
+    ↓
+Bridge
+Then demonstrate:
+kill worker;
+restart;
+kill while approval is parked;
+July AS OF;
+fourth-entity scope attack;
+hardest technical problem and solution.
+Why?
+These aren't optional presentation suggestions; they are explicitly listed in the submission requirements.
+
+Phase 20 — Clean-Machine Final Gate ⭐ NEW
+Finally:
+Fresh environment
+       ↓
+Clone repository
+       ↓
+README only
+       ↓
+docker compose up
+       ↓
+seed
+       ↓
+run acceptance tests
+       ↓
+demo
+No:
+"run this undocumented command"
+"manually create this row"
+"change this seed file"
+"set this secret manually without documentation"
+Why?
+Because the evaluator explicitly says:
+Anything requiring a step not written in the README counts as not working.
+
+Final revised dependency order
+The most important thing is that we don't simply add phases at the end.
+The dependency should be:
+PHASE 0
+Repository / Assignment
+       ↓
+PHASE 1
+Environment + Data Contract
+       ↓
+PHASE 2
+Postgres Plan Spine
+       ↓
+PHASE 3
+FinOpsExpr
+       ↓
+PHASE 4
+Compiler + Security
+       ↓
+PHASE 5
+ClickHouse
+       ↓
+PHASE 6
+Variance Bridge
+       ↓
+PHASE 7
+Bridge Tests
+       ↓
+PHASE 8
+Temporal Recompute
+       ↓
+PHASE 9
+Durable Human Approval
+       ↓
+PHASE 10
+Commitment Service
+       ↓
+PHASE 11
+Agno Team
+       ↓
+PHASE 12
+Agno Guardrails
+       ↓
+PHASE 13
+PII Gate
+       ↓
+PHASE 14
+Vue UI
+       ↓
+PHASE 15
+Acceptance Tests
+       ↓
+PHASE 16
+Adversarial Tests
+       ↓
+PHASE 17
+Temporal Replay
+       ↓
+PHASE 18
+README
+       ↓
+PHASE 19
+Video
+       ↓
+PHASE 20
+Clean-Machine Final Gate
+The key change
+I would not change the fundamental architecture.
+The new findings mainly tell us:
+Make the previously implicit assignment requirements explicit inside the phases.
+The three phases that deserve the biggest upgrade are:
+Phase 6 — Variance Bridge
+Because the interaction/decomposition methodology is a major evaluation point.
+Phase 11–12 — Agno
+Because data-drift detection, stable IDs, actual Team usage, framework guardrails, authenticated HTTP, and cost/latency measurement are all explicitly evaluated.
+Phase 18–20 — Delivery
+Because the evaluator literally follows the README and tests the system from a clean machine.
+So yes, we should update our implementation prompt before giving it to Claude/Codex. The architecture doesn't need changing; the phase requirements and acceptance gates need tightening.
+
