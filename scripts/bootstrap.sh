@@ -8,9 +8,6 @@ if [ ! -f .env ]; then
   echo "created .env from .env.example (edit in your LLM API key if you want the agent tier live)"
 fi
 
-echo "==> starting containers"
-docker compose up -d --build
-
 wait_for() {
   local name="$1" cmd="$2" tries=0
   until eval "$cmd" >/dev/null 2>&1; do
@@ -23,6 +20,14 @@ wait_for() {
   done
   echo "==> $name is up"
 }
+
+# api/temporal-worker connect as the fpa_app Postgres role at startup, which
+# the governance migration below is what actually creates -- so they must
+# not start until after migrations run, or they crash-exit on a role that
+# doesn't exist yet and (with no restart policy racing a role that appears
+# seconds later) stay dead. Bring up only their dependencies first.
+echo "==> starting infra containers"
+docker compose up -d --build postgres clickhouse temporal commitment
 
 wait_for "postgres" "docker compose exec -T postgres pg_isready -U postgres -d fpa"
 wait_for "clickhouse" "curl -sf -u default:fpa 'http://localhost:8123/?query=SELECT+1'"
@@ -37,5 +42,8 @@ if [ -f alembic.ini ]; then
   # the in-network hostname the api/worker containers use.
   DATABASE_URL="postgresql+asyncpg://postgres:fpa@localhost:5431/fpa" uv run alembic upgrade head
 fi
+
+echo "==> starting api and temporal-worker"
+docker compose up -d --build api temporal-worker
 
 echo "==> bootstrap complete"
