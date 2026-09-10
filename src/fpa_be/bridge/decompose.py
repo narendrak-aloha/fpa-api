@@ -156,9 +156,16 @@ def decompose(
     qty = {r.key: r.plan_qty for r in rows}
     prior_state = plan_total
 
-    # VOLUME: uniform scale, mix untouched.
-    scale = (actual_qty_total / plan_qty_total) if plan_qty_total else 0.0
-    qty = {r.key: r.plan_qty * scale for r in rows}
+    # VOLUME: uniform scale, mix untouched. When the whole population has
+    # zero plan quantity (e.g. every row is a brand-new line with no plan
+    # basis at all), there's no ratio to scale by -- fall back to splitting
+    # the actual total evenly, same rationale as the mix-step fallback
+    # below, so the cascade still reaches actual_qty by construction
+    # instead of getting stuck at zero.
+    if plan_qty_total:
+        qty = {r.key: r.plan_qty * (actual_qty_total / plan_qty_total) for r in rows}
+    else:
+        qty = {r.key: actual_qty_total / len(rows) for r in rows}
     new_state = _state(rows, qty, "plan", "plan")
     legs.append(BridgeLeg(volume_leg_name, new_state - prior_state))
     prior_state = new_state
