@@ -138,3 +138,36 @@ def _referenced_driver_names(node: object, driver_names: set[str]) -> set[str]:
 
     walk(node)
     return found
+
+
+def resolve_dirty_set(driver_formulas: dict[str, object], shocked: set[str]) -> list[str]:
+    """The recompute workflow's step 2: given the frozen driver library (name
+    -> parsed formula AST) and the set of names a shock touched directly,
+    returns every dirty driver -- the shocked names plus everything that
+    transitively depends on them -- in calc_order_dag topological order, so
+    a caller can recompute each in turn without ever evaluating a driver
+    before something it reads.
+
+    Drivers outside the dirty set are left alone entirely: they're already
+    correct, and only the ones actually affected by this shock need new
+    values.
+    """
+    order = topological_driver_order(driver_formulas)
+    driver_names = set(driver_formulas)
+    deps = {name: _referenced_driver_names(node, driver_names) for name, node in driver_formulas.items()}
+
+    dependents: dict[str, set[str]] = {name: set() for name in driver_formulas}
+    for name, refs in deps.items():
+        for ref in refs:
+            dependents[ref].add(name)
+
+    dirty = set(shocked)
+    frontier = list(shocked)
+    while frontier:
+        name = frontier.pop()
+        for dependent in dependents.get(name, ()):
+            if dependent not in dirty:
+                dirty.add(dependent)
+                frontier.append(dependent)
+
+    return [name for name in order if name in dirty]
