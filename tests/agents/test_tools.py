@@ -4,6 +4,7 @@
 
 import json
 
+import asyncpg
 import pytest
 
 from fpa_be.agents.tools import (
@@ -14,6 +15,7 @@ from fpa_be.agents.tools import (
     propose_driver,
     run_finops_query,
 )
+from fpa_be.db import app_dsn
 from fpa_be.registry.dimensions import DIM_COLUMNS, SEPARATE_AXES
 
 from .conftest import make_run_context
@@ -26,11 +28,12 @@ class TestExactlyFourTools:
 
 
 class TestSecurityContextRequired:
-    def test_run_finops_query_without_security_context_raises(self):
+    @pytest.mark.asyncio
+    async def test_run_finops_query_without_security_context_raises(self):
         rc = make_run_context()
         rc.dependencies = {}
         with pytest.raises(NoSecurityContextError):
-            run_finops_query.entrypoint(dsl="SELECT services_revenue", run_context=rc)
+            await run_finops_query.entrypoint(dsl="SELECT services_revenue", run_context=rc)
 
 
 class TestListMetrics:
@@ -48,27 +51,49 @@ class TestListDimensions:
 
 
 class TestRunFinopsQuery:
-    def test_valid_query_against_live_cube(self, run_context):
+    @pytest.mark.asyncio
+    async def test_valid_query_against_live_cube(self, run_context):
         dsl = "SELECT services_revenue WHERE geo_country = 'PL' FOR PERIOD 2026-Q2"
-        result = json.loads(run_finops_query.entrypoint(dsl=dsl, run_context=run_context))
+        result = json.loads(await run_finops_query.entrypoint(dsl=dsl, run_context=run_context))
         assert result["dsl"] == dsl
         assert len(result["rows"]) > 0
 
-    def test_malformed_dsl_returns_error_not_exception(self, run_context):
-        result = json.loads(run_finops_query.entrypoint(dsl="SELECT not_a_real_metric", run_context=run_context))
+    @pytest.mark.asyncio
+    async def test_malformed_dsl_returns_error_not_exception(self, run_context):
+        result = json.loads(await run_finops_query.entrypoint(dsl="SELECT not_a_real_metric", run_context=run_context))
         assert "error" in result
 
-    def test_scope_widening_is_rejected_server_side(self, run_context):
+    @pytest.mark.asyncio
+    async def test_scope_widening_is_rejected_server_side(self, run_context):
         """A caller scoped to Poland (RTPL1) asking for Germany gets a
         compiled query narrowed to their scope regardless of the WHERE they
         wrote -- never another entity's real rows."""
         result = json.loads(
-            run_finops_query.entrypoint(
+            await run_finops_query.entrypoint(
                 dsl="SELECT services_revenue WHERE geo_country = 'DE' FOR PERIOD 2026-Q2", run_context=run_context
             )
         )
         if "error" not in result:
             assert all(float(row[-1]) == 0 for row in result["rows"])
+
+    @pytest.mark.asyncio
+    async def test_customer_dimension_is_masked_and_disclosure_logged(self, run_context):
+        dsl = "SELECT services_revenue BY customer WHERE geo_country = 'PL' FOR PERIOD 2026-Q2"
+        result = json.loads(await run_finops_query.entrypoint(dsl=dsl, run_context=run_context))
+        assert "error" not in result
+        customer_idx = result["columns"].index("customer")
+        assert all(str(row[customer_idx]).startswith("[customer_identity:") for row in result["rows"])
+
+        conn = await asyncpg.connect(app_dsn())
+        try:
+            row = await conn.fetchrow(
+                "SELECT classes, methods FROM llm_disclosure_log WHERE tool_name = 'run_finops_query' "
+                "ORDER BY id DESC LIMIT 1"
+            )
+        finally:
+            await conn.close()
+        assert "customer_identity" in row["classes"]
+        assert "tokenize" in row["methods"]
 
 
 class TestProposeDriver:

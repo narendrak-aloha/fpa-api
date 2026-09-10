@@ -28,6 +28,7 @@ from fpa_be.db import app_dsn
 from fpa_be.dsl.errors import FinOpsExprError
 from fpa_be.dsl.parser import parse_expr, parse_query
 from fpa_be.dsl.resolver import check_node
+from fpa_be.masking.gate import DisclosureLogWriteError, mask_and_disclose
 from fpa_be.registry.dimensions import DIM_COLUMNS, SEPARATE_AXES
 from fpa_be.registry.measures import public_measures
 
@@ -70,26 +71,30 @@ def list_dimensions(run_context: RunContext) -> str:
 
 
 @tool()
-def run_finops_query(dsl: str, run_context: RunContext) -> str:
+async def run_finops_query(dsl: str, run_context: RunContext) -> str:
     """Run a FinOpsExpr query against the cube. `dsl` is a `query` per the
     grammar (e.g. `SELECT services_revenue BY practice WHERE geo_country =
     'PL' FOR PERIOD 2026-Q2`). Returns the result rows, the vintage they
     were read from, and the compiled DSL echoed back -- every number in an
-    answer built from this must trace back to a row in here."""
+    answer built from this must trace back to a row in here. Any personal
+    column (customer, resource_employee) is masked and disclosure-logged
+    before this ever returns (Phase 13's PII gate) -- fail closed if that
+    logging fails."""
     security_context = _security_context(run_context)
     try:
         query = parse_query(dsl)
         check_node(query)
         cube = CubeClient()
         result = cube.run(query, security_context)
-    except (FinOpsExprError, CompilerError) as exc:
+        masked_rows = await mask_and_disclose("run_finops_query", security_context, result.columns, result.rows)
+    except (FinOpsExprError, CompilerError, DisclosureLogWriteError) as exc:
         return json.dumps({"error": str(exc)})
     return json.dumps(
         {
             "dsl": dsl,
             "vintage": result.vintage,
             "columns": list(result.columns),
-            "rows": [list(row) for row in result.rows],
+            "rows": masked_rows,
         },
         default=str,
     )
