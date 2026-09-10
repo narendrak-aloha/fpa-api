@@ -93,11 +93,15 @@ async def drill_through(line_id: int, request: Request):
     # persist_bridge stores 0 (not NULL) for "vintage unresolved at write time"
     # -- actual_fact_source's "latest" sentinel is None, not 0.
     source = actual_fact_source(line["vintage"] or None)
+    # cited_rows are hex-encoded dim_signature_hash values (bytes aren't
+    # JSON-serializable for the jsonb column); FixedString comparison needs
+    # the raw bytes back.
+    hashes = [bytes.fromhex(h) for h in cited_rows]
     try:
         result = client.query(
             f"SELECT company, period_month, account, dim_signature_hash, quantity, amount_functional "
             f"FROM {source} WHERE dim_signature_hash IN {{hashes:Array(String)}}",
-            parameters={"hashes": cited_rows},
+            parameters={"hashes": hashes},
         )
     finally:
         client.close()
