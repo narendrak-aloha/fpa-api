@@ -8,7 +8,7 @@ from httpx import ASGITransport, AsyncClient
 os.environ.setdefault("CLICKHOUSE_HOST", "localhost")
 os.environ.setdefault("CLICKHOUSE_PORT", "8123")
 
-from main import app  # noqa: E402
+from main import app
 
 TRUNCATE_TABLES = ("audit_event", "plan_version_line", "plan_driver", "plan_version")
 

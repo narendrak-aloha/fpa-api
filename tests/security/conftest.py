@@ -6,7 +6,7 @@ import pytest
 os.environ.setdefault("CLICKHOUSE_HOST", "localhost")
 os.environ.setdefault("CLICKHOUSE_PORT", "8123")
 
-from tests.agents.conftest import make_run_context  # noqa: E402
+from tests.agents.conftest import make_run_context
 
 
 @pytest.fixture

@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: fpa
+          POSTGRES_DB: fpa
+        ports:
+          - 5431:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d fpa"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      clickhouse:
+        image: clickhouse/clickhouse-server:latest
+        env:
+          CLICKHOUSE_PASSWORD: fpa
+        ports:
+          - 8123:8123
+          - 9000:9000
+
+      temporal:
+        image: temporalio/temporal:latest
+        command: server start-dev --ip 0.0.0.0
+        ports:
+          - 7233:7233
+          - 8233:8233
+
+    # The Commitment Service has no published image (services/commitment is
+    # only ever built from source, per docker-compose.yml) and GitHub
+    # Actions' `services:` block can't `build:` a local Dockerfile -- it's
+    # started as a plain background uvicorn process against the checked-out
+    # source instead (see "Start the standalone Commitment Service" below).
+    # Phase 20's clean-machine gate (docker compose up) is what actually
+    # proves the Docker image itself builds and runs correctly.
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5431
+      CLICKHOUSE_HOST: localhost
+      CLICKHOUSE_PORT: 8123
+      COMMITMENT_SERVICE_URL: http://localhost:8001
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Wait for ClickHouse
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf -u default:fpa 'http://localhost:8123/?query=SELECT+1' && break
+            sleep 2
+          done
+
+      - name: Wait for Temporal
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8233 && break
+            sleep 2
+          done
+
+      - name: Run Postgres migrations
+        run: |
+          DATABASE_URL="postgresql+asyncpg://postgres:fpa@localhost:5431/fpa" uv run alembic upgrade head
+
+      - name: Seed the cube
+        run: |
+          uv run python seed_fpa.py --host localhost --password fpa --drop
+
+      - name: Start the standalone Commitment Service
+        run: |
+          uv run uvicorn services.commitment.main:app --host 0.0.0.0 --port 8001 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8001/health && break
+            sleep 1
+          done
+
+      - name: Run the full test suite
+        run: uv run pytest -q

@@ -37,8 +37,6 @@ from fpa_be.dsl.resolver import check_node
 from fpa_be.masking import gate
 from fpa_be.masking.gate import DisclosureLogWriteError, mask_and_disclose
 
-from tests.agents.conftest import make_run_context
-
 PL_SCOPE = SecurityContext(allowed_companies=frozenset({"RTPL1"}))
 THREE_ENTITY_SCOPE = SecurityContext(allowed_companies=frozenset({"RTUS1", "RTUS2", "RTUS3"}))
 
