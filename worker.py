@@ -1,25 +1,28 @@
-"""Temporal worker entrypoint.
-
-Placeholder for Phase 0: proves the worker container can connect to the
-Temporal server and stay up. Workflows and activities (PlanRecomputeWorkflow
-and friends) are registered here in Phase 8.
-"""
+"""Temporal worker entrypoint: registers PlanRecomputeWorkflow, its
+partition-fan-out child workflow, and every activity they call."""
 
 import asyncio
 import os
 
-from temporalio import workflow
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from fpa_be.workflows import activities as acts
+from fpa_be.workflows.plan_recompute import PartitionRecomputeWorkflow, PlanRecomputeWorkflow
 
-@workflow.defn(name="PlaceholderWorkflow")
-class PlaceholderWorkflow:
-    """Stands in for PlanRecomputeWorkflow until Phase 8 registers the real thing."""
-
-    @workflow.run
-    async def run(self) -> str:
-        return "not implemented until phase 8"
+WORKFLOWS = [PlanRecomputeWorkflow, PartitionRecomputeWorkflow]
+ACTIVITIES = [
+    acts.check_plan_locked,
+    acts.snapshot_drivers,
+    acts.resolve_dirty_set_activity,
+    acts.evaluate_partition,
+    acts.write_plan_lines,
+    acts.publish_to_cube,
+    acts.rollback_cube_publish,
+    acts.commit_to_treasury,
+    acts.compensate_commitment,
+    acts.compute_variance,
+]
 
 
 async def main() -> None:
@@ -30,8 +33,8 @@ async def main() -> None:
     client = await Client.connect(target, namespace=namespace)
     print(f"connected to temporal at {target}, namespace={namespace}")
 
-    worker = Worker(client, task_queue=task_queue, workflows=[PlaceholderWorkflow])
-    print(f"worker listening on task queue '{task_queue}' (PlanRecomputeWorkflow lands in phase 8)")
+    worker = Worker(client, task_queue=task_queue, workflows=WORKFLOWS, activities=ACTIVITIES)
+    print(f"worker listening on task queue '{task_queue}' ({len(WORKFLOWS)} workflows, {len(ACTIVITIES)} activities)")
     await worker.run()
 
 
