@@ -38,3 +38,8 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+# seed_fpa.py is provided/frozen (see docs/DATA_MODEL.md) and is never
+# edited, so it's out of scope for lint.
+exclude = ["seed_fpa.py"]
