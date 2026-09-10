@@ -252,6 +252,15 @@ def _build_monthly_cte(
 def _fact_source(resolved_vintage: int | None) -> str:
     if resolved_vintage is None:
         return "fact_gl_actual FINAL"
+    # Reconstructs the table's own ReplacingMergeTree(_version, _is_deleted)
+    # dedup by hand, scoped to versions <= resolved_vintage, since ClickHouse
+    # has no "FINAL as of version N" primitive. Known limitation: on the rare
+    # key where two genuinely distinct GL lines collide on the full
+    # (company, period_month, account, dim_signature_hash) grain *and* share
+    # the same _version, argMax's tie-break isn't guaranteed to match the
+    # table engine's own internal merge order for a plain FINAL read -- an
+    # inherent ambiguity in ReplacingMergeTree itself when a version isn't
+    # unique per key, not something this query can resolve more precisely.
     dim_cols = ", ".join(f"any({d}) AS {d}" for d in DIM_COLUMNS)
     return (
         "(\n"

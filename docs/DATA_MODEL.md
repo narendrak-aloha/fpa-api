@@ -34,7 +34,16 @@ about 65k matched keys per the seed's own verification output.
    the same keys. `AS OF <timestamp>` resolves to the vintage whose
    `closed_at <= timestamp` (latest such one); no `AS OF` clause reads the
    latest vintage — an explicit, documented default, not an accident of
-   "whatever the table returns."
+   "whatever the table returns." Reading the latest vintage is a plain
+   `FINAL` (the canonical read path); reading an earlier vintage means
+   reconstructing the dedup by hand (`argMax(_version)` scoped to
+   `_version <= N`), since ClickHouse has no "FINAL as of version N"
+   primitive. On the rare key where two genuinely distinct GL lines
+   collide on the full grain *and* share the same `_version` — a property
+   of realistic transaction volume, not a versioning artifact — that
+   reconstruction's tie-break isn't guaranteed to match `FINAL`'s own
+   internal merge order; an inherent ambiguity in `ReplacingMergeTree`
+   itself when a version isn't unique per key, not a bug in the reader.
 4. **Intercompany pairing.** ~6% of trade is internal: a sale to
    `CUST-IC-<company>` with `intercompany_flag='Yes'` has exactly one
    mirrored cost row on the buying entity, account `51500`, in that entity's
