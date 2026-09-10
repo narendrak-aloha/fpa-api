@@ -17,6 +17,7 @@ alone doesn't protect a member invoked directly -- alongside Agno's own
 field to check against instead of parsing prose.
 """
 
+import json
 import re
 
 from agno.agent import Agent
@@ -26,10 +27,12 @@ from agno.team import Team
 from agno.team.mode import TeamMode
 from pydantic import BaseModel, Field
 
+from fpa_be.agents.drift import DEFAULT_DRIFT_THRESHOLD_PCT
 from fpa_be.agents.guardrails import CubeDataInjectionGuardrail
 from fpa_be.agents.tools import list_dimensions, list_metrics, propose_driver, run_finops_query
 
 TOOL_CALL_LIMIT = 8
+DRIFT_DETECTOR_MEMBER_ID = "drift-detector"
 
 _pii_guardrail = PIIDetectionGuardrail()
 _injection_guardrail = CubeDataInjectionGuardrail()
@@ -83,6 +86,45 @@ def citation_post_hook(run_output=None, **kwargs) -> None:
     uncited = answer_numbers - cited_numbers
     if uncited:
         raise UncitedNumberError(f"answer cites numbers with no matching cube row: {sorted(uncited)}")
+
+
+def _run_finops_query_totals(member_response) -> list[float]:
+    """Every `run_finops_query` result the drift-detector member actually
+    got back, summed to a total each, in call order."""
+    totals: list[float] = []
+    for execution in getattr(member_response, "tools", None) or []:
+        if execution.tool_name != "run_finops_query" or not execution.result:
+            continue
+        try:
+            payload = json.loads(execution.result)
+        except (TypeError, ValueError):
+            continue
+        rows = payload.get("rows") or []
+        if rows:
+            totals.append(sum(float(str(row[-1]).replace(",", "")) for row in rows))
+    return totals
+
+
+def drift_post_hook(run_output=None, **kwargs) -> None:
+    """Recomputes drift directly from the drift-detector member's own
+    `run_finops_query` tool results and forces `drift_flag` accordingly --
+    independent of whatever the leader's synthesized prose says, so a
+    suppressed or miscounted drift can never reach the planner as `False`.
+    """
+    content = getattr(run_output, "content", None)
+    if not isinstance(content, CopilotAnswer):
+        return
+
+    for member_response in getattr(run_output, "member_responses", None) or []:
+        if getattr(member_response, "agent_id", None) != DRIFT_DETECTOR_MEMBER_ID:
+            continue
+        totals = _run_finops_query_totals(member_response)
+        if len(totals) < 2:
+            continue
+        older, newer = totals[0], totals[-1]
+        delta_pct = abs(newer - older) / abs(older) * 100 if older else (100.0 if newer else 0.0)
+        if delta_pct > DEFAULT_DRIFT_THRESHOLD_PCT:
+            content.drift_flag = True
 
 
 def _member(name: str, role: str, instructions: list[str], model: Model, include_propose_driver: bool = False) -> Agent:
@@ -164,7 +206,7 @@ def build_team(model: Model) -> Team:
             "and mention it -- never omit a reported drift regardless of how the rest of the answer reads.",
         ],
         pre_hooks=list(_shared_guardrails),
-        post_hooks=[citation_post_hook],
+        post_hooks=[drift_post_hook, citation_post_hook],
         tool_call_limit=TOOL_CALL_LIMIT,
         output_schema=CopilotAnswer,
         markdown=False,

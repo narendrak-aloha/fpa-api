@@ -3,6 +3,7 @@ sets, output schema) and the citation post-hook that enforces "every number
 in the answer must appear in a cited cube row" independent of prose parsing.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from agno.team.mode import TeamMode
 
 from fpa_be.agents.model import default_model
 from fpa_be.agents.team import (
+    DRIFT_DETECTOR_MEMBER_ID,
     TOOL_CALL_LIMIT,
     Citation,
     CopilotAnswer,
@@ -17,7 +19,16 @@ from fpa_be.agents.team import (
     _numbers_in,
     build_team,
     citation_post_hook,
+    drift_post_hook,
 )
+
+
+def _tool_execution(tool_name, result):
+    return SimpleNamespace(tool_name=tool_name, result=result)
+
+
+def _member_response(agent_id, tool_results):
+    return SimpleNamespace(agent_id=agent_id, tools=[_tool_execution("run_finops_query", r) for r in tool_results])
 
 
 @pytest.fixture(scope="module")
@@ -93,3 +104,44 @@ class TestCitationPostHook:
 
     def test_ignores_missing_run_output(self):
         citation_post_hook(run_output=None)
+
+
+class TestDriftPostHook:
+    def test_forces_drift_flag_when_member_totals_disagree(self):
+        answer = CopilotAnswer(answer="No drift detected.", drift_flag=False)
+        member_response = _member_response(
+            DRIFT_DETECTOR_MEMBER_ID,
+            [
+                json.dumps({"rows": [["100.00"]]}),
+                json.dumps({"rows": [["200.00"]]}),
+            ],
+        )
+        drift_post_hook(run_output=SimpleNamespace(content=answer, member_responses=[member_response]))
+        assert answer.drift_flag is True
+
+    def test_leaves_drift_flag_false_when_totals_agree(self):
+        answer = CopilotAnswer(answer="No drift detected.", drift_flag=False)
+        member_response = _member_response(
+            DRIFT_DETECTOR_MEMBER_ID,
+            [
+                json.dumps({"rows": [["100.00"]]}),
+                json.dumps({"rows": [["100.00"]]}),
+            ],
+        )
+        drift_post_hook(run_output=SimpleNamespace(content=answer, member_responses=[member_response]))
+        assert answer.drift_flag is False
+
+    def test_ignores_non_drift_detector_members(self):
+        answer = CopilotAnswer(answer="answer", drift_flag=False)
+        member_response = _member_response(
+            "query-answerer",
+            [json.dumps({"rows": [["100.00"]]}), json.dumps({"rows": [["999.00"]]})],
+        )
+        drift_post_hook(run_output=SimpleNamespace(content=answer, member_responses=[member_response]))
+        assert answer.drift_flag is False
+
+    def test_ignores_non_copilot_answer_content(self):
+        drift_post_hook(run_output=SimpleNamespace(content="plain string", member_responses=[]))
+
+    def test_ignores_missing_run_output(self):
+        drift_post_hook(run_output=None)
