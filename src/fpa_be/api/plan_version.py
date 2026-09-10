@@ -100,6 +100,18 @@ async def submit_plan_version(plan_id: uuid.UUID, body: ActorAction, request: Re
         return _serialize(updated)
 
 
+@router.post("/{plan_id}/reject")
+async def reject_plan_version(plan_id: uuid.UUID, body: ActorAction, request: Request):
+    async with _pool(request).acquire() as conn:
+        row = await _get_plan(conn, plan_id)
+        await _assert_legal_transition(conn, row["state"], "Draft")
+        updated = await conn.fetchrow(
+            "UPDATE plan_version SET state = 'Draft' WHERE id = $1 RETURNING *", plan_id
+        )
+        await _audit(conn, plan_id, "reject", body.actor, body.actor_role, _serialize(updated))
+        return _serialize(updated)
+
+
 @router.post("/{plan_id}/approve")
 async def approve_plan_version(plan_id: uuid.UUID, body: ActorAction, request: Request):
     async with _pool(request).acquire() as conn:

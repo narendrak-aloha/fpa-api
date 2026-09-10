@@ -64,6 +64,21 @@ async def test_illegal_transition_is_rejected(client):
     assert resp.status_code == 409
 
 
+async def test_reject_returns_plan_to_draft(client):
+    plan = await _create(client, requested_by="alice")
+    await client.post(f"/plan-versions/{plan['id']}/submit", json={"actor": "alice"})
+
+    resp = await client.post(f"/plan-versions/{plan['id']}/reject", json={"actor": "bob"})
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "Draft"
+
+
+async def test_reject_from_draft_is_illegal(client):
+    plan = await _create(client, requested_by="alice")
+    resp = await client.post(f"/plan-versions/{plan['id']}/reject", json={"actor": "bob"})
+    assert resp.status_code == 409
+
+
 async def test_full_lifecycle_to_locked(client):
     plan = await _create(client, requested_by="alice")
     await client.post(f"/plan-versions/{plan['id']}/submit", json={"actor": "alice"})
