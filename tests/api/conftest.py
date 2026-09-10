@@ -3,7 +3,7 @@ from httpx import ASGITransport, AsyncClient
 
 from main import app
 
-TRUNCATE_TABLES = ("audit_event", "plan_version_line", "plan_driver", "plan_version")
+TRUNCATE_TABLES = ("audit_event", "plan_version_line", "plan_driver", "plan_driver_proposal", "plan_version")
 
 
 @pytest_asyncio.fixture(autouse=True)

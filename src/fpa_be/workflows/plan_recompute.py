@@ -9,10 +9,13 @@ choice lives in `fpa_be.workflows.activities`; this module is pure
 orchestration so it replays identically every time.
 
 Design decisions locked in by the plan (`optimized-gathering-wozniak.md`):
-- A second driver shock arriving after the dirty set has been resolved for
-  the in-flight revision is *rejected* (Decision 2), not folded in -- an
-  `update` validator enforces this, not just the handler body, so the
-  rejection happens before the update is even accepted into history.
+- A second driver shock is folded in if it arrives before the dirty set is
+  resolved, and *rejected* after (Decision 2) -- an `update` validator
+  enforces the rejection, so it happens before the update is even accepted
+  into history; the handler folds an accepted shock into the shock set.
+- Compensation leaves both write surfaces reversed: the cube publish is
+  rolled back and the commitment under this revision's idempotency key is
+  reversed, retrying until the counterparty answers.
 - An approval that isn't signalled within the timeout window *expires* into
   `Rejected(reason="timeout")` (Decision 3) -- nothing publishes, nothing
   commits.
@@ -54,6 +57,7 @@ class PlanRecomputeInput:
     # this workflow's own continue_as_new call, never by an external caller.
     resume_formulas: dict[str, str] = field(default_factory=dict)
     resume_bindings: dict[str, float] = field(default_factory=dict)
+    resume_shocks: dict[str, float] = field(default_factory=dict)
     resume_dirty_set: list[str] = field(default_factory=list)
     resume_partition_index: int = 0
     resume_evaluated: list[acts.EvaluatedDriver] = field(default_factory=list)
@@ -70,6 +74,11 @@ class PlanRecomputeResult:
 
 _ACTIVITY_TIMEOUT = timedelta(seconds=30)
 _ACTIVITY_RETRY = RetryPolicy(maximum_attempts=3, non_retryable_error_types=["ApplicationError"])
+# Reversing a commitment is retried until the counterparty answers (a 4xx is
+# raised non-retryable by the activity itself); if it still hasn't within the
+# window, the run fails loudly rather than finishing with the ledger unknown.
+_COMPENSATION_RETRY = RetryPolicy(backoff_coefficient=2.0, maximum_interval=timedelta(seconds=30), maximum_attempts=0)
+_COMPENSATION_WINDOW = timedelta(hours=24)
 
 
 @workflow.defn
@@ -103,9 +112,16 @@ class PlanRecomputeWorkflow:
         self._approval: bool | None = None  # None = pending, True = approved, False = rejected
         self._approval_actor: str | None = None
         self._approval_reason: str | None = None
+        self._folded_shocks: list[DriverShock] = []
+        self._plan_version_id: str | None = None
+        self._revision: int | None = None
+        self._requested_by: str | None = None
 
     @workflow.run
     async def run(self, input: PlanRecomputeInput) -> PlanRecomputeResult:
+        self._plan_version_id = input.plan_version_id
+        self._revision = input.revision
+        self._requested_by = input.requested_by
         resuming = bool(input.resume_dirty_set)
 
         if not resuming:
@@ -132,7 +148,11 @@ class PlanRecomputeWorkflow:
                 name: (d.rate_value if d.rate_value is not None else 0.0)
                 for name, d in snapshot.drivers.items()
             }
-            shocks = {s.name: s.value for s in input.driver_shocks}
+            # Decision 2: shocks the `shock_driver` update accepted up to here
+            # are folded in; from here on its validator refuses them, since
+            # the dirty set is about to be resolved from exactly this set.
+            self._dirty_set_resolved = True
+            shocks = {s.name: s.value for s in [*input.driver_shocks, *self._folded_shocks]}
             bindings.update(shocks)
 
             self._phase = "resolving_dirty_set"
@@ -142,15 +162,12 @@ class PlanRecomputeWorkflow:
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 retry_policy=_ACTIVITY_RETRY,
             )
-            # Decision 2: from this point on, a shock update for this
-            # revision is rejected -- the dirty set it would need to widen
-            # has already been resolved and handed to the fan-out below.
-            self._dirty_set_resolved = True
             partition_start = 0
             evaluated_all: list[acts.EvaluatedDriver] = []
         else:
             formulas = input.resume_formulas
             bindings = dict(input.resume_bindings)
+            shocks = dict(input.resume_shocks)
             dirty_set = input.resume_dirty_set
             partition_start = input.resume_partition_index
             evaluated_all = list(input.resume_evaluated)
@@ -172,6 +189,7 @@ class PlanRecomputeWorkflow:
                         approval_timeout_seconds=input.approval_timeout_seconds,
                         resume_formulas=formulas,
                         resume_bindings=bindings,
+                        resume_shocks=shocks,
                         resume_dirty_set=dirty_set,
                         resume_partition_index=i,
                         resume_evaluated=evaluated_all,
@@ -181,7 +199,7 @@ class PlanRecomputeWorkflow:
             result = await workflow.execute_child_workflow(
                 PartitionRecomputeWorkflow.run,
                 acts.EvaluatePartitionInput(
-                    driver_names=partitions[i], formulas=formulas, bindings=dict(bindings)
+                    driver_names=partitions[i], formulas=formulas, bindings=dict(bindings), shocked=shocks
                 ),
                 id=f"{workflow.info().workflow_id}-partition-{i}",
             )
@@ -231,11 +249,14 @@ class PlanRecomputeWorkflow:
             return PlanRecomputeResult(status="Rejected", reason="plan_version is no longer Locked", dirty_set=dirty_set)
 
         published = False
+        publish_input = acts.PublishToCubeInput(
+            plan_version_id=input.plan_version_id, scenario_id=input.scenario_id, revision=input.revision
+        )
+        commitment_input = acts.CommitmentInput(
+            plan_version_id=input.plan_version_id, scenario_id=input.scenario_id, revision=input.revision
+        )
         try:
             self._phase = "publishing_to_cube"
-            publish_input = acts.PublishToCubeInput(
-                plan_version_id=input.plan_version_id, scenario_id=input.scenario_id, revision=input.revision
-            )
             await workflow.execute_activity(
                 acts.publish_to_cube,
                 publish_input,
@@ -245,40 +266,28 @@ class PlanRecomputeWorkflow:
             published = True
 
             self._phase = "committing_to_treasury"
-            total_amount = sum(d.value for d in evaluated_all)
             commit_result = await workflow.execute_activity(
                 acts.commit_to_treasury,
-                acts.CommitToTreasuryInput(
-                    plan_version_id=input.plan_version_id,
-                    scenario_id=input.scenario_id,
-                    revision=input.revision,
-                    amount=total_amount,
-                ),
+                commitment_input,
                 start_to_close_timeout=_ACTIVITY_TIMEOUT,
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except (ActivityError, ApplicationError):
-            if published:
-                self._phase = "compensating"
-                await workflow.execute_activity(
-                    acts.rollback_cube_publish,
-                    publish_input,
-                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
-                    retry_policy=_ACTIVITY_RETRY,
-                )
+            if not published:
+                self._phase = "done"
+                return PlanRecomputeResult(status="Rejected", reason="publish_to_cube failed", dirty_set=dirty_set)
+            # A failed commit may still have landed (a timeout after the
+            # write), so the commitment is reversed as well as the cube.
+            await self._compensate(publish_input, commitment_input)
             self._phase = "done"
             return PlanRecomputeResult(
-                status="Rejected", reason="commit_to_treasury failed; cube publish rolled back", dirty_set=dirty_set
+                status="Rejected",
+                reason="commit_to_treasury failed; cube publish rolled back and commitment reversed",
+                dirty_set=dirty_set,
             )
         except asyncio.CancelledError:
             if published:
-                self._phase = "compensating"
-                await workflow.execute_activity(
-                    acts.rollback_cube_publish,
-                    publish_input,
-                    start_to_close_timeout=_ACTIVITY_TIMEOUT,
-                    retry_policy=_ACTIVITY_RETRY,
-                )
+                await self._compensate(publish_input, commitment_input)
             raise
 
         self._phase = "computing_variance"
@@ -299,11 +308,27 @@ class PlanRecomputeWorkflow:
             variance_report_id=variance.report_id,
         )
 
+    async def _compensate(self, publish_input: acts.PublishToCubeInput, commitment_input: acts.CommitmentInput) -> None:
+        self._phase = "compensating"
+        await workflow.execute_activity(
+            acts.rollback_cube_publish,
+            publish_input,
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            retry_policy=_ACTIVITY_RETRY,
+        )
+        await workflow.execute_activity(
+            acts.compensate_commitment,
+            commitment_input,
+            start_to_close_timeout=_ACTIVITY_TIMEOUT,
+            schedule_to_close_timeout=_COMPENSATION_WINDOW,
+            retry_policy=_COMPENSATION_RETRY,
+        )
+
     @workflow.update
     async def shock_driver(self, shock: DriverShock) -> None:
-        # Body left empty on purpose: acceptance/rejection is entirely the
-        # validator's job below, so a rejected update never enters history.
-        return None
+        # Only reached once the validator below has accepted the shock, i.e.
+        # before the dirty set is resolved -- so it is folded into the set.
+        self._folded_shocks.append(shock)
 
     @shock_driver.validator
     def validate_shock_driver(self, shock: DriverShock) -> None:
@@ -330,4 +355,10 @@ class PlanRecomputeWorkflow:
     @workflow.query
     def progress(self) -> dict:
         fraction = self._partitions_done / self._partitions_total if self._partitions_total else 0.0
-        return {"phase": self._phase, "dirty_set_fraction_complete": fraction}
+        return {
+            "phase": self._phase,
+            "dirty_set_fraction_complete": fraction,
+            "plan_version_id": self._plan_version_id,
+            "revision": self._revision,
+            "requested_by": self._requested_by,
+        }

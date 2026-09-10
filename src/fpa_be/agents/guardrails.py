@@ -24,6 +24,7 @@ on the leader alone doesn't protect a member invoked directly), and
 reachable.
 """
 
+import inspect
 from typing import Union
 
 from agno.exceptions import CheckTrigger, InputCheckError
@@ -80,11 +81,17 @@ class CubeDataInjectionGuardrail(BaseGuardrail):
         boundary an InputCheckError protects."""
         return _QUARANTINE_TEMPLATE.format(text=text) if self._matches(text) else text
 
-    def screen_tool_result(self, function_name, function_call, arguments, run_context=None):
+    async def screen_tool_result(self, function_name, function_call, arguments, run_context=None):
         """A `tool_hooks`-compatible callable: runs the tool, then screens
         any string content in its result before it re-enters the message
-        history the model reads next."""
+        history the model reads next.
+
+        Async because the tools are: in Agno's async chain, `function_call`
+        returns a coroutine, and a sync hook would hand that coroutine back
+        unawaited -- screening nothing and breaking the tool result."""
         result = function_call(**arguments)
+        if inspect.isawaitable(result):
+            result = await result
         if isinstance(result, str):
             return self.screen_text(result)
         return result

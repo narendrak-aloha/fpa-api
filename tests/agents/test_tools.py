@@ -1,5 +1,7 @@
 """The exactly-four agent tools, end to end against live ClickHouse/Postgres:
-`list_metrics`, `list_dimensions`, `run_finops_query`, `propose_driver`.
+`list_metrics`, `list_dimensions`, `run_finops_query`, `propose_driver` --
+plus the masking gate, which is the tool hook every agent carries around
+them rather than something inside a tool body.
 """
 
 import json
@@ -16,9 +18,16 @@ from fpa_be.agents.tools import (
     run_finops_query,
 )
 from fpa_be.db import app_dsn
+from fpa_be.masking.gate import disclosure_tool_hook
 from fpa_be.registry.dimensions import DIM_COLUMNS, SEPARATE_AXES
+from tests.conftest import SUPERUSER_DSN
 
 from .conftest import make_run_context
+
+PL_Q2_BRIDGE = (
+    "SELECT services_revenue BY practice WHERE geo_country = 'PL' FOR PERIOD 2026-Q2 "
+    "COMPARE PLAN pv='PV-2026-0001' TO ACTUAL BRIDGE"
+)
 
 
 class TestExactlyFourTools:
@@ -77,9 +86,16 @@ class TestRunFinopsQuery:
             assert all(float(row[-1]) == 0 for row in result["rows"])
 
     @pytest.mark.asyncio
-    async def test_customer_dimension_is_masked_and_disclosure_logged(self, run_context):
+    async def test_customer_dimension_is_masked_and_disclosure_logged_by_the_tool_hook(self, run_context):
         dsl = "SELECT services_revenue BY customer WHERE geo_country = 'PL' FOR PERIOD 2026-Q2"
-        result = json.loads(await run_finops_query.entrypoint(dsl=dsl, run_context=run_context))
+        result = json.loads(
+            await disclosure_tool_hook(
+                "run_finops_query",
+                run_finops_query.entrypoint,
+                {"dsl": dsl, "run_context": run_context},
+                run_context=run_context,
+            )
+        )
         assert "error" not in result
         customer_idx = result["columns"].index("customer")
         assert all(str(row[customer_idx]).startswith("[customer_identity:") for row in result["rows"])
@@ -95,8 +111,38 @@ class TestRunFinopsQuery:
         assert "customer_identity" in row["classes"]
         assert "tokenize" in row["methods"]
 
+    @pytest.mark.asyncio
+    async def test_a_bridge_query_returns_legs_that_tie_at_every_node(self, run_context):
+        result = json.loads(await run_finops_query.entrypoint(dsl=PL_Q2_BRIDGE, run_context=run_context))
+        assert result["vintage"] is None
+        col = {name: i for i, name in enumerate(result["columns"])}
+        assert {"Volume", "Mix(practice)", "Mix(grade)", "Price", "FX", "residual", "tol"} <= col.keys()
+        assert len(result["rows"]) > 1
+        for row in result["rows"]:
+            assert abs(row[col["residual"]]) < row[col["tol"]]
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_vintage_is_a_structured_error(self, run_context):
+        result = json.loads(
+            await run_finops_query.entrypoint(
+                dsl="SELECT services_revenue FOR PERIOD 2026-Q2 AS OF 99", run_context=run_context
+            )
+        )
+        assert set(result) == {"error"}
+
+
+async def _delete_draft_proposals(name: str) -> None:
+    conn = await asyncpg.connect(SUPERUSER_DSN)
+    try:
+        await conn.execute("DELETE FROM plan_driver_proposal WHERE name = $1", name)
+    finally:
+        await conn.close()
+
 
 class TestProposeDriver:
+    def test_still_requires_human_confirmation(self):
+        assert propose_driver.requires_confirmation is True
+
     @pytest.mark.asyncio
     async def test_malformed_formula_returns_error_not_exception(self, run_context):
         result = json.loads(
@@ -110,9 +156,9 @@ class TestProposeDriver:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_insert_then_update_against_live_postgres(self, run_context):
+    async def test_records_a_draft_and_never_touches_the_live_driver(self, run_context):
         try:
-            first = json.loads(
+            result = json.loads(
                 await propose_driver.entrypoint(
                     name="pytest_bill_rate",
                     formula="150 * utilisation",
@@ -120,65 +166,33 @@ class TestProposeDriver:
                     run_context=run_context,
                 )
             )
-            assert first["proposed_driver"] == "pytest_bill_rate"
-            assert first["effective_date"] == "2026-01-01"
-
-            second = json.loads(
-                await propose_driver.entrypoint(
-                    name="pytest_bill_rate",
-                    formula="160 * utilisation",
-                    effective_date="2026-02-01",
-                    run_context=run_context,
-                )
-            )
-            assert second["formula"] == "160 * utilisation"
-            assert second["effective_date"] == "2026-02-01"
-        finally:
-            import asyncpg
-
-            from fpa_be.db import app_dsn
+            assert result["state"] == "Draft"
 
             conn = await asyncpg.connect(app_dsn())
             try:
-                await conn.execute("DELETE FROM plan_driver WHERE name = 'pytest_bill_rate'")
+                proposal = await conn.fetchrow(
+                    "SELECT proposed_by, state FROM plan_driver_proposal WHERE id = $1", result["proposal_id"]
+                )
+                live = await conn.fetchval("SELECT count(*) FROM plan_driver WHERE name = 'pytest_bill_rate'")
             finally:
                 await conn.close()
+            assert tuple(proposal) == ("planner@example.com", "Draft")
+            assert live == 0
+        finally:
+            await _delete_draft_proposals("pytest_bill_rate")
 
     @pytest.mark.asyncio
-    async def test_rate_value_cannot_be_updated_by_fpa_app_role(self, run_context):
-        """rate_value is fpa_controller-only at the DB grant level (Phase 2);
-        this tool's INSERT ... ON CONFLICT DO UPDATE deliberately omits it so
-        that column-level REVOKE, not app logic, is what blocks the write."""
-        import asyncpg
-
-        from fpa_be.db import app_dsn
-
-        try:
+    async def test_a_run_without_an_authenticated_caller_cannot_propose(self):
+        result = json.loads(
             await propose_driver.entrypoint(
-                name="pytest_rate_driver",
-                formula="1.0",
-                effective_date="2026-01-01",
-                run_context=run_context,
-                is_rate_driver=True,
-                rate_value=42.0,
+                name="pytest_orphan", formula="1", effective_date="2026-01-01", run_context=make_run_context(user_id=None)
             )
-            await propose_driver.entrypoint(
-                name="pytest_rate_driver",
-                formula="1.0",
-                effective_date="2026-01-01",
-                run_context=run_context,
-                is_rate_driver=True,
-                rate_value=99.0,
-            )
-            conn = await asyncpg.connect(app_dsn())
-            try:
-                row = await conn.fetchrow("SELECT rate_value FROM plan_driver WHERE name = 'pytest_rate_driver'")
-            finally:
-                await conn.close()
-            assert float(row["rate_value"]) == 42.0
-        finally:
-            conn = await asyncpg.connect(app_dsn())
-            try:
-                await conn.execute("DELETE FROM plan_driver WHERE name = 'pytest_rate_driver'")
-            finally:
-                await conn.close()
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_effective_date_is_a_structured_error(self, run_context):
+        result = json.loads(
+            await propose_driver.entrypoint(name="pytest_x", formula="1", effective_date="soon", run_context=run_context)
+        )
+        assert "error" in result

@@ -1,14 +1,19 @@
-"""Phase 13: the single chokepoint every tool's cube-reading path passes
-through before a result ever reaches the model.
+"""The single chokepoint between cube data and any model.
 
-Pipeline: classify by dimension (never by sniffing the value's text) ->
-mask/tokenize personal columns -> hash-log the disclosure to
-`llm_disclosure_log` (never the payload itself, only its hash) -> only then
-return to the caller. Any failure anywhere in this pipeline blocks the send
--- fail closed, no partial send.
+Pipeline, in order, every time: resolve the caller's scope -> (the tool has
+already fetched through the compiler) -> classify by dimension (never by
+sniffing the value's text) -> mask/tokenize personal columns -> hash-log the
+disclosure to `llm_disclosure_log` (never the payload itself, only its hash)
+-> only then hand the result to the model. Any failure anywhere blocks the
+send -- fail closed, no partial send.
+
+`disclosure_tool_hook` is how this is attached: as an Agno tool hook on
+every agent (see `fpa_be.agents.team`), so the guarantee is structural
+rather than something each tool body has to remember to call.
 """
 
 import hashlib
+import inspect
 import json
 from collections.abc import Sequence
 
@@ -31,6 +36,8 @@ PERSONAL_COLUMNS: dict[str, str] = {
     "annual_loaded_cost": "compensation",
     "standard_bill_rate": "compensation",
 }
+
+_WITHHELD = json.dumps({"error": "tool result withheld: the disclosure log could not be written"})
 
 
 class DisclosureLogWriteError(RuntimeError):
@@ -76,22 +83,17 @@ def _scope_json(security_context: SecurityContext) -> str:
     )
 
 
-async def mask_and_disclose(
-    tool_name: str,
-    security_context: SecurityContext,
-    columns: Sequence[str],
-    rows: Sequence[Sequence],
-) -> list[list]:
-    """The one path from a cube result to what a tool hands the model:
-    classify personal columns by name, mask them, log the disclosure
-    (classes, method, scope, and a payload hash -- never the payload), and
-    only then return the send-safe rows. A failed log write raises and
-    blocks the send entirely.
-    """
-    masked_rows, classes = classify_and_mask(columns, rows)
-    payload_hash = hashlib.sha256(json.dumps(masked_rows, default=str).encode("utf-8")).hexdigest()
+def _payload_hash(payload) -> str:
+    return hashlib.sha256(json.dumps(payload, default=str).encode("utf-8")).hexdigest()
 
-    conn = await asyncpg.connect(app_dsn())
+
+async def _log_disclosure(
+    tool_name: str, security_context: SecurityContext, classes: set[str], payload_hash: str
+) -> None:
+    try:
+        conn = await asyncpg.connect(app_dsn())
+    except Exception as exc:
+        raise DisclosureLogWriteError(f"failed to reach llm_disclosure_log: {exc}") from exc
     try:
         await conn.execute(
             """
@@ -109,4 +111,54 @@ async def mask_and_disclose(
     finally:
         await conn.close()
 
+
+async def mask_and_disclose(
+    tool_name: str,
+    security_context: SecurityContext,
+    columns: Sequence[str],
+    rows: Sequence[Sequence],
+) -> list[list]:
+    """Classify personal columns by name, mask them, log the disclosure
+    (classes, method, scope, and a payload hash -- never the payload), and
+    only then return the send-safe rows. A failed log write raises and
+    blocks the send entirely.
+    """
+    masked_rows, classes = classify_and_mask(columns, rows)
+    await _log_disclosure(tool_name, security_context, classes, _payload_hash(masked_rows))
     return masked_rows
+
+
+def _cube_payload(result) -> dict | None:
+    if not isinstance(result, str):
+        return None
+    try:
+        payload = json.loads(result)
+    except ValueError:
+        return None
+    if isinstance(payload, dict) and "columns" in payload and "rows" in payload:
+        return payload
+    return None
+
+
+async def disclosure_tool_hook(function_name, function_call, arguments, run_context=None):
+    """Agno tool hook: runs the tool, then gates its result before the model
+    ever reads it. Cube results (`columns` + `rows`) are classified and
+    masked; every result, cube or not, gets a disclosure-log row. A missing
+    scope or a failed log write withholds the result entirely."""
+    security_context = (getattr(run_context, "dependencies", None) or {}).get("security_context")
+    if security_context is None:
+        return json.dumps({"error": "no security_context for this run; tool result withheld"})
+
+    result = function_call(**arguments)
+    if inspect.isawaitable(result):
+        result = await result
+
+    try:
+        payload = _cube_payload(result)
+        if payload is None:
+            await _log_disclosure(function_name, security_context, set(), _payload_hash(result))
+            return result
+        payload["rows"] = await mask_and_disclose(function_name, security_context, payload["columns"], payload["rows"])
+        return json.dumps(payload, default=str)
+    except DisclosureLogWriteError:
+        return _WITHHELD

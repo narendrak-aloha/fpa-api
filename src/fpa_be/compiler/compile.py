@@ -101,7 +101,9 @@ def compile(
     if query.period is None:
         raise UnsupportedQueryShapeError("FOR PERIOD is required on every query -- every result must be bounded")
     if query.compare is not None or query.bridge:
-        raise UnsupportedQueryShapeError("COMPARE PLAN .. TO ACTUAL / BRIDGE are compiled by the bridge engine (Phase 6), not this compiler")
+        raise UnsupportedQueryShapeError(
+            "COMPARE PLAN .. TO ACTUAL is only supported together with BRIDGE, which compiles via compile_bridge()"
+        )
 
     start, end = period.range_bounds(query.period)
     measure_specs = [_compile_query_measure(m) for m in query.measures]
@@ -118,7 +120,7 @@ def compile(
 
     # Time functions look backwards past the caller's own FOR PERIOD (e.g.
     # YOY needs the same month a year earlier) -- fetch that much extra
-    # history into monthly/rollup, then QUALIFY back down to what was asked.
+    # history into monthly/rollup, then trim back down to what was asked.
     lookback_months = max((_lookback_months(spec) for spec in measure_specs), default=0)
     fetch_start = period.add_months(start, -lookback_months) if lookback_months else start
     _check_cost_budget(fetch_start, end, security_context)
@@ -131,7 +133,13 @@ def compile(
     order_by = ", ".join(rollup_dims) if rollup_dims else None
     sql = f"WITH monthly AS (\n{monthly_sql}\n),\nrollup AS (\n{rollup_sql}\n)\nSELECT {select_sql}\nFROM rollup"
     if lookback_months and "period_month" in rollup_dims:
-        sql += f"\nQUALIFY period_month >= {params.add(start.isoformat(), 'Date')} AND period_month < {params.add(end.isoformat(), 'Date')}"
+        # ClickHouse has no QUALIFY, so nest the window-function SELECT and
+        # drop the lookback rows outside it -- what QUALIFY desugars to.
+        trim = (
+            f"period_month >= {params.add(start.isoformat(), 'Date')} "
+            f"AND period_month < {params.add(end.isoformat(), 'Date')}"
+        )
+        sql = f"SELECT * FROM (\n{sql}\n)\nWHERE {trim}"
     if order_by:
         sql += f"\nORDER BY {order_by}"
     if query.limit is not None:
@@ -233,11 +241,8 @@ def _build_monthly_cte(
     where_parts = [
         f"period_month >= {params.add(start.isoformat(), 'Date')}",
         f"period_month < {params.add(end.isoformat(), 'Date')}",
+        *_scope_predicates(security_context, params),
     ]
-    if security_context.allowed_companies is not None:
-        where_parts.append(f"company IN {params.add(sorted(security_context.allowed_companies), 'Array(String)')}")
-    if security_context.allowed_geo_countries is not None:
-        where_parts.append(f"geo_country IN {params.add(sorted(security_context.allowed_geo_countries), 'Array(String)')}")
     if where is not None:
         where_parts.append(_compile_predicate(where, params))
 
@@ -247,6 +252,15 @@ def _build_monthly_cte(
         f"WHERE {' AND '.join(where_parts)}\n"
         f"GROUP BY {', '.join(group_cols)}"
     )
+
+
+def _scope_predicates(security_context: SecurityContext, params: _ParamPool) -> list[str]:
+    parts = []
+    if security_context.allowed_companies is not None:
+        parts.append(f"company IN {params.add(sorted(security_context.allowed_companies), 'Array(String)')}")
+    if security_context.allowed_geo_countries is not None:
+        parts.append(f"geo_country IN {params.add(sorted(security_context.allowed_geo_countries), 'Array(String)')}")
+    return parts
 
 
 # ---- WHERE predicate compilation --------------------------------------------
@@ -363,3 +377,180 @@ def _time_function_expr(spec: _QueryMeasure, base_expr: str, partition_dims: lis
     if func == "ROLLING":
         return f"sum({base_expr}) {_window_over(partition_dims, f'ROWS BETWEEN {n - 1} PRECEDING AND CURRENT ROW')}"
     raise UnsupportedQueryShapeError(f"unhandled time function: {func}")
+
+
+# ---- BRIDGE: the matched plan/actual population ------------------------------
+#
+# The bridge needs row-level (plan row, actual row) pairs -- quantity, price
+# and FX separately -- not the pre-aggregated measures compile() returns, so
+# it has its own statement shape. It is still emitted here, under the same
+# contract: registry-resolved names only, scope injected, every literal bound.
+
+_BRIDGE_ROLLUP_DIMS = frozenset({"company", "account", "practice", "grade"})
+
+
+@dataclass(frozen=True)
+class CompiledBridge:
+    compiled: CompiledQuery
+    measure: str
+    kind: str  # "revenue" | "cost" -- which leg set the decomposition uses
+    by: tuple[str, ...]
+
+
+def compile_bridge(
+    query: ast.Query,
+    security_context: SecurityContext,
+    resolved_vintage: int | None = None,
+) -> CompiledBridge:
+    check_node(query)
+
+    if query.period is None:
+        raise UnsupportedQueryShapeError("FOR PERIOD is required on every query -- every result must be bounded")
+    if not query.bridge or query.compare is None:
+        raise UnsupportedQueryShapeError(
+            "BRIDGE needs COMPARE PLAN pv='...' TO ACTUAL: it decomposes the gap between one plan and the ledger"
+        )
+    if query.limit is not None:
+        raise UnsupportedQueryShapeError("LIMIT does not apply to BRIDGE; narrow it with WHERE or BY instead")
+    if len(query.measures) != 1 or not isinstance(query.measures[0], ast.Ident):
+        raise UnsupportedQueryShapeError("BRIDGE decomposes exactly one bare measure, e.g. SELECT services_revenue ...")
+
+    name = query.measures[0].name
+    measure = resolve_metric_name(name)
+    if not isinstance(measure, AccountAmountMeasure) or measure.column != "amount_functional":
+        raise UnsupportedQueryShapeError(
+            f"{name!r} cannot be bridged: BRIDGE splits an additive account-amount measure into quantity, price and FX legs"
+        )
+    kind = _bridge_kind(measure)
+
+    by = tuple(dict.fromkeys(query.by))
+    unsupported = [d for d in by if d not in _BRIDGE_ROLLUP_DIMS]
+    if unsupported:
+        raise UnsupportedQueryShapeError(
+            f"BRIDGE rolls up BY {sorted(_BRIDGE_ROLLUP_DIMS)} only; got {unsupported}"
+        )
+
+    start, end = period.range_bounds(query.period)
+    _check_cost_budget(start, end, security_context)
+    compiled = compile_matched_rows(
+        security_context,
+        start,
+        end,
+        resolved_vintage,
+        plan_version=query.compare.plan_version,
+        scenario_id=query.compare.scenario or "base",
+        accounts=measure.accounts,
+        where=query.where,
+    )
+    return CompiledBridge(compiled=compiled, measure=name, kind=kind, by=by)
+
+
+def _bridge_kind(measure: AccountAmountMeasure) -> str:
+    if all(a.startswith("4") for a in measure.accounts):
+        return "revenue"
+    if all(a.startswith("5") for a in measure.accounts):
+        return "cost"
+    raise UnsupportedQueryShapeError(
+        f"{measure.name!r} mixes revenue and cost accounts; bridge each side on its own measure"
+    )
+
+
+def compile_matched_rows(
+    security_context: SecurityContext,
+    start,
+    end,
+    resolved_vintage: int | None,
+    plan_version: str,
+    scenario_id: str,
+    accounts: tuple[str, ...] | None = None,
+    where: object = None,
+) -> CompiledQuery:
+    """Plan (`fact_plan_line`) joined to actual (vintage-aware) on the full
+    matched key `(company, period_month, account, dim_signature_hash)`, over
+    [start, end), with plan and actual FX looked up to USD. Only keys present
+    on both sides survive -- a one-sided line has no gap to decompose."""
+    params = _ParamPool()
+    plan_version_p = params.add(plan_version, "String")
+    scenario_p = params.add(scenario_id, "String")
+    plan_filters = _matched_side_filters(security_context, start, end, accounts, where, params)
+    actual_filters = _matched_side_filters(security_context, start, end, accounts, where, params)
+
+    sql = f"""
+SELECT
+    p.company AS company,
+    p.period_month AS period_month,
+    p.account AS account,
+    p.dim_signature_hash AS dim_signature_hash,
+    p.practice AS practice,
+    p.grade AS grade,
+    p.quantity AS plan_qty,
+    p.unit_price AS plan_price,
+    fx_plan.rate AS plan_fx,
+    a.quantity AS actual_qty,
+    a.unit_price AS actual_price,
+    fx_actual.rate AS actual_fx
+FROM
+(
+    SELECT company, period_month, account, dim_signature_hash, practice, grade,
+           quantity, unit_price, functional_currency
+    FROM fact_plan_line FINAL
+    WHERE plan_version = {plan_version_p} AND scenario_id = {scenario_p} AND {plan_filters}
+) AS p
+INNER JOIN
+(
+    SELECT company, period_month, account, dim_signature_hash, quantity, unit_price, functional_currency
+    FROM {actual_fact_source(resolved_vintage)}
+    WHERE {actual_filters}
+) AS a
+ON p.company = a.company
+   AND p.period_month = a.period_month
+   AND p.account = a.account
+   AND p.dim_signature_hash = a.dim_signature_hash
+INNER JOIN dim_fx_plan AS fx_plan
+    ON fx_plan.plan_version = {plan_version_p}
+       AND fx_plan.period_month = p.period_month
+       AND fx_plan.from_currency = p.functional_currency
+       AND fx_plan.to_currency = 'USD'
+INNER JOIN dim_fx_actual AS fx_actual
+    ON fx_actual.period_month = a.period_month
+       AND fx_actual.from_currency = a.functional_currency
+       AND fx_actual.to_currency = 'USD'
+"""
+    return CompiledQuery(sql=sql, params=params.params, vintage=resolved_vintage)
+
+
+def _matched_side_filters(security_context, start, end, accounts, where, params: _ParamPool) -> str:
+    parts = [
+        f"period_month >= {params.add(start.isoformat(), 'Date')}",
+        f"period_month < {params.add(end.isoformat(), 'Date')}",
+        *_scope_predicates(security_context, params),
+    ]
+    if accounts is not None:
+        parts.append(f"account IN {params.add(list(accounts), 'Array(String)')}")
+    if where is not None:
+        parts.append(_compile_predicate(where, params))
+    return " AND ".join(parts)
+
+
+# ---- drill-through: the cube rows behind a bridge line ------------------------
+
+
+def compile_drill_through(
+    signature_hashes: list[bytes],
+    resolved_vintage: int | None,
+    security_context: SecurityContext,
+    row_limit: int,
+) -> CompiledQuery:
+    params = _ParamPool()
+    where_parts = [
+        f"dim_signature_hash IN {params.add(signature_hashes, 'Array(String)')}",
+        *_scope_predicates(security_context, params),
+    ]
+    sql = (
+        "SELECT company, period_month, account, dim_signature_hash, quantity, amount_functional\n"
+        f"FROM {actual_fact_source(resolved_vintage)}\n"
+        f"WHERE {' AND '.join(where_parts)}\n"
+        "ORDER BY company, period_month, account\n"
+        f"LIMIT {params.add(row_limit, 'UInt32')}"
+    )
+    return CompiledQuery(sql=sql, params=params.params, vintage=resolved_vintage)

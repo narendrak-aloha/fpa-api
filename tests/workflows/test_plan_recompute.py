@@ -6,6 +6,7 @@ logic: HITL parking, timeout expiry, second-shock rejection, and the
 publish-then-commit-fails compensation saga).
 """
 
+import asyncio
 import uuid
 
 import pytest
@@ -41,7 +42,7 @@ _DRIVERS = {
 
 
 def _mock_activities(*, locked: bool = True, commit_should_fail: bool = False):
-    calls = {"publish": 0, "rollback": 0, "commit": 0}
+    calls = {"publish": 0, "rollback": 0, "commit": 0, "compensate": 0}
 
     @activity.defn(name="check_plan_locked")
     async def check_plan_locked(plan_version_id: str) -> bool:
@@ -65,7 +66,9 @@ def _mock_activities(*, locked: bool = True, commit_should_fail: bool = False):
         bindings = dict(input.bindings)
         evaluated = []
         for name in input.driver_names:
-            value = eval_expr(parse_expr(input.formulas[name]), bindings)
+            value = input.shocked.get(name, None)
+            if value is None:
+                value = eval_expr(parse_expr(input.formulas[name]), bindings)
             bindings[name] = value
             evaluated.append(
                 acts.EvaluatedDriver(name=name, value=value, formula=input.formulas[name], inputs=dict(bindings))
@@ -86,15 +89,15 @@ def _mock_activities(*, locked: bool = True, commit_should_fail: bool = False):
         calls["rollback"] += 1
 
     @activity.defn(name="commit_to_treasury")
-    async def commit_to_treasury(input: acts.CommitToTreasuryInput) -> acts.CommitToTreasuryResult:
+    async def commit_to_treasury(input: acts.CommitmentInput) -> acts.CommitToTreasuryResult:
         calls["commit"] += 1
         if commit_should_fail:
             raise RuntimeError("commitment service: simulated failure")
         return acts.CommitToTreasuryResult(commitment_id="commitment-123")
 
     @activity.defn(name="compensate_commitment")
-    async def compensate_commitment(input: acts.CompensateCommitmentInput) -> None:
-        pass
+    async def compensate_commitment(input: acts.CommitmentInput) -> None:
+        calls["compensate"] += 1
 
     @activity.defn(name="compute_variance")
     async def compute_variance(input: acts.ComputeVarianceInput) -> acts.ComputeVarianceResult:
@@ -253,6 +256,8 @@ class TestCompensation:
         assert "rolled back" in result.reason
         assert calls["publish"] == 1
         assert calls["rollback"] == 1
+        # the failed commit may still have landed, so it is reversed too
+        assert calls["compensate"] == 1
 
 
 class TestSecondShockRejection:
@@ -295,3 +300,66 @@ class TestProgressQuery:
 
         assert progress["phase"] == "done"
         assert progress["dirty_set_fraction_complete"] == 1.0
+        assert progress["requested_by"] == "planner@example.com"
+
+
+class TestShockSurvivesEvaluation:
+    """The real evaluate_partition activity: a shocked driver keeps its
+    shocked value (its own formula is not re-evaluated over it), and its
+    dependents are computed from the shock."""
+
+    async def test_shocked_value_is_used_and_propagates(self):
+        from temporalio.testing import ActivityEnvironment
+
+        result = await ActivityEnvironment().run(
+            acts.evaluate_partition,
+            acts.EvaluatePartitionInput(
+                driver_names=["bill_rate", "revenue_forecast"],
+                formulas={name: d.formula for name, d in _DRIVERS.items()},
+                bindings={"bill_rate": 175.0, "utilisation": 0.75},
+                shocked={"bill_rate": 175.0},
+            ),
+        )
+        values = {d.name: d.value for d in result.evaluated}
+        assert values == {"bill_rate": 175.0, "revenue_forecast": 0.75 * 175.0}
+        assert [d.shocked for d in result.evaluated] == [True, False]
+
+
+class TestShockFoldedInBeforeDirtySetResolution:
+    """An update that arrives before the dirty set is resolved is folded
+    in, not silently dropped. Run against the real Temporal server so the
+    snapshot activity can be held open while the update is delivered."""
+
+    async def test_an_early_second_shock_widens_the_dirty_set(self):
+        from temporalio.client import Client
+
+        release = asyncio.Event()
+        activities, _ = _mock_activities()
+
+        @activity.defn(name="snapshot_drivers")
+        async def held_snapshot(input: acts.SnapshotDriversInput) -> acts.SnapshotDriversResult:
+            await release.wait()
+            return acts.SnapshotDriversResult(drivers=dict(_DRIVERS))
+
+        activities = [held_snapshot if a.__name__ == "snapshot_drivers" else a for a in activities]
+        client = await Client.connect("localhost:7233", namespace="default")
+        task_queue = f"tq-{uuid.uuid4()}"
+        async with Worker(
+            client,
+            task_queue=task_queue,
+            workflows=[PlanRecomputeWorkflow, PartitionRecomputeWorkflow],
+            activities=activities,
+        ):
+            handle = await client.start_workflow(
+                PlanRecomputeWorkflow.run,
+                _input(driver_shocks=[DriverShock(name="bill_rate", value=175.0)], approval_timeout_seconds=30.0),
+                id=f"wf-{uuid.uuid4()}",
+                task_queue=task_queue,
+            )
+            await handle.execute_update(PlanRecomputeWorkflow.shock_driver, DriverShock(name="utilisation", value=0.74))
+            release.set()
+            await handle.signal(PlanRecomputeWorkflow.approve, "cfo@example.com")
+            result = await handle.result()
+
+        assert "utilisation" in result.dirty_set
+        assert "bill_rate" in result.dirty_set

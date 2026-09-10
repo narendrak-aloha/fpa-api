@@ -35,7 +35,7 @@ from fpa_be.compiler.security import SecurityContext
 from fpa_be.dsl.parser import parse_query
 from fpa_be.dsl.resolver import check_node
 from fpa_be.masking import gate
-from fpa_be.masking.gate import DisclosureLogWriteError, mask_and_disclose
+from fpa_be.masking.gate import DisclosureLogWriteError, disclosure_tool_hook, mask_and_disclose
 
 PL_SCOPE = SecurityContext(allowed_companies=frozenset({"RTPL1"}))
 THREE_ENTITY_SCOPE = SecurityContext(allowed_companies=frozenset({"RTUS1", "RTUS2", "RTUS3"}))
@@ -112,7 +112,14 @@ class TestPromptInjectionInCubeData:
         guardrail would need to catch it. Belt and suspenders, verified
         together here."""
         dsl = "SELECT services_revenue BY customer WHERE geo_country = 'PL' FOR PERIOD 2026-Q2"
-        result = json.loads(await run_finops_query.entrypoint(dsl=dsl, run_context=run_context))
+        result = json.loads(
+            await disclosure_tool_hook(
+                "run_finops_query",
+                run_finops_query.entrypoint,
+                {"dsl": dsl, "run_context": run_context},
+                run_context=run_context,
+            )
+        )
         assert "error" not in result
         customer_idx = result["columns"].index("customer")
         for row in result["rows"]:
@@ -144,6 +151,28 @@ class TestPIIFailurePaths:
         monkeypatch.setattr(gate.asyncpg, "connect", _broken_connect)
         with pytest.raises(DisclosureLogWriteError):
             await mask_and_disclose("adversarial_test", PL_SCOPE, ["customer"], [["CUST-00001"]])
+
+    @pytest.mark.asyncio
+    async def test_the_tool_hook_withholds_the_whole_result_when_the_log_is_down(self, monkeypatch, run_context):
+        """Same failure, seen from where the model sits: the tool ran and
+        fetched rows, but because the disclosure could not be logged the
+        model receives an error and not a single row."""
+
+        async def _unreachable(*args, **kwargs):
+            raise OSError("simulated disclosure-log outage")
+
+        monkeypatch.setattr(gate.asyncpg, "connect", _unreachable)
+        dsl = "SELECT services_revenue BY customer WHERE geo_country = 'PL' FOR PERIOD 2026-Q2"
+        result = json.loads(
+            await disclosure_tool_hook(
+                "run_finops_query",
+                run_finops_query.entrypoint,
+                {"dsl": dsl, "run_context": run_context},
+                run_context=run_context,
+            )
+        )
+        assert set(result) == {"error"}
+        assert "CUST-" not in json.dumps(result)
 
     def test_misclassified_column_name_is_not_silently_treated_as_personal(self):
         """Classification is by exact dimension name, never fuzzy/text

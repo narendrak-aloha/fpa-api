@@ -5,7 +5,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from temporalio.client import Client
 
-from fpa_be.api import copilot_router, plan_version_router, variance_router, workflow_progress_router
+from fpa_be.api import (
+    copilot_router,
+    driver_proposals_router,
+    plan_version_router,
+    variance_router,
+    workflow_progress_router,
+)
 from fpa_be.db import app_pool
 
 
@@ -31,6 +37,7 @@ app.include_router(plan_version_router)
 app.include_router(variance_router)
 app.include_router(workflow_progress_router)
 app.include_router(copilot_router)
+app.include_router(driver_proposals_router)
 
 
 @app.get("/health")

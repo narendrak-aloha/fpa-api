@@ -9,12 +9,15 @@ and synthesizes+cites from members' structured results -- which is what
 makes the post-hook citation check below possible in one place instead of
 duplicated per member.
 
-Guardrails (Phase 12): `CubeDataInjectionGuardrail` is attached as a
-`pre_hook` on the leader *and* every member -- a guardrail on the leader
-alone doesn't protect a member invoked directly -- alongside Agno's own
-`PIIDetectionGuardrail`. `tool_call_limit` bounds runaway tool loops.
-`output_schema` on the leader gives the citation post-hook a `cited_rows`
-field to check against instead of parsing prose.
+Guardrails: `CubeDataInjectionGuardrail` is attached as a `pre_hook` on the
+leader *and* every member -- a guardrail on the leader alone doesn't protect
+a member invoked directly -- alongside Agno's own `PIIDetectionGuardrail`.
+Every member also carries two tool hooks: the masking gate
+(`disclosure_tool_hook`) innermost around each tool, and the injection
+screen outside it. `tool_call_limit` bounds runaway tool loops.
+`output_schema` on the leader gives the post-hooks a structured answer to
+check -- against what the tools actually returned, never against the
+model's own account of it.
 """
 
 import json
@@ -29,7 +32,13 @@ from pydantic import BaseModel, Field
 
 from fpa_be.agents.drift import DEFAULT_DRIFT_THRESHOLD_PCT
 from fpa_be.agents.guardrails import CubeDataInjectionGuardrail
-from fpa_be.agents.tools import list_dimensions, list_metrics, propose_driver, run_finops_query
+from fpa_be.agents.tools import (
+    list_dimensions,
+    list_metrics,
+    propose_driver,
+    run_finops_query,
+)
+from fpa_be.masking.gate import disclosure_tool_hook
 
 TOOL_CALL_LIMIT = 8
 DRIFT_DETECTOR_MEMBER_ID = "drift-detector"
@@ -37,12 +46,15 @@ DRIFT_DETECTOR_MEMBER_ID = "drift-detector"
 _pii_guardrail = PIIDetectionGuardrail()
 _injection_guardrail = CubeDataInjectionGuardrail()
 _shared_guardrails = [_pii_guardrail, _injection_guardrail]
-_shared_tool_hooks = [_injection_guardrail.screen_tool_result]
+# Agno nests tool hooks with the first one outermost, so the masking gate
+# sits directly around the tool: nothing -- not even the injection screen --
+# sees a result before it has been masked and disclosure-logged.
+_shared_tool_hooks = [_injection_guardrail.screen_tool_result, disclosure_tool_hook]
 
 
 class Citation(BaseModel):
     dsl: str = Field(description="the exact run_finops_query DSL string that produced this row")
-    row: list = Field(description="the cited row, as returned by run_finops_query")
+    row: list = Field(description="the cited row, exactly as returned by run_finops_query")
 
 
 class CopilotAnswer(BaseModel):
@@ -59,7 +71,8 @@ class CopilotAnswer(BaseModel):
 
 
 class UncitedNumberError(ValueError):
-    """Raised by the post-hook when a number in the answer has no matching citation."""
+    """Raised by the post-hook when the answer or a citation is not backed
+    by a query a member actually ran."""
 
 
 def _numbers_in(text: str) -> set[str]:
@@ -68,41 +81,64 @@ def _numbers_in(text: str) -> set[str]:
     return set(re.findall(r"(?<![A-Za-z])-?\d[\d,]*\.?\d*", text))
 
 
+def executed_queries(run_output) -> list[dict]:
+    """Every successful `run_finops_query` a member actually ran, as the
+    tool handed it to the model (after masking): member id, DSL, vintage,
+    columns and rows. The citation check and the API's trace are both built
+    from this, never from what the model says it ran."""
+    executed = []
+    for member_response in getattr(run_output, "member_responses", None) or []:
+        member_id = getattr(member_response, "agent_id", None)
+        for execution in getattr(member_response, "tools", None) or []:
+            if execution.tool_name != "run_finops_query" or not execution.result:
+                continue
+            try:
+                payload = json.loads(execution.result)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict) or "rows" not in payload:
+                continue
+            executed.append(
+                {
+                    "member_id": member_id,
+                    "dsl": payload.get("dsl"),
+                    "vintage": payload.get("vintage"),
+                    "columns": payload.get("columns"),
+                    "rows": payload["rows"],
+                }
+            )
+    return executed
+
+
+def _row_key(row) -> tuple[str, ...]:
+    return tuple(str(value) for value in row)
+
+
 def citation_post_hook(run_output=None, **kwargs) -> None:
-    """Every number in the final answer must appear in the cited rows, or
-    the response is rejected. Runs against the leader's structured
-    `CopilotAnswer` output, not by re-parsing free text.
-    """
+    """Every citation must name a query a member actually ran and a row that
+    query actually returned, and every number in the answer must appear in
+    those verified rows -- or the response is rejected."""
     content = getattr(run_output, "content", None)
     if not isinstance(content, CopilotAnswer):
         return
 
+    rows_by_dsl: dict[str, set[tuple[str, ...]]] = {}
+    for query in executed_queries(run_output):
+        rows_by_dsl.setdefault(query["dsl"], set()).update(_row_key(r) for r in query["rows"])
+
     cited_numbers: set[str] = set()
     for citation in content.citations:
+        returned = rows_by_dsl.get(citation.dsl)
+        if returned is None:
+            raise UncitedNumberError(f"citation names a query no member ran: {citation.dsl!r}")
+        if _row_key(citation.row) not in returned:
+            raise UncitedNumberError(f"cited row was not returned by {citation.dsl!r}: {citation.row}")
         for value in citation.row:
             cited_numbers.update(_numbers_in(str(value)))
 
-    answer_numbers = _numbers_in(content.answer)
-    uncited = answer_numbers - cited_numbers
+    uncited = _numbers_in(content.answer) - cited_numbers
     if uncited:
         raise UncitedNumberError(f"answer cites numbers with no matching cube row: {sorted(uncited)}")
-
-
-def _run_finops_query_totals(member_response) -> list[float]:
-    """Every `run_finops_query` result the drift-detector member actually
-    got back, summed to a total each, in call order."""
-    totals: list[float] = []
-    for execution in getattr(member_response, "tools", None) or []:
-        if execution.tool_name != "run_finops_query" or not execution.result:
-            continue
-        try:
-            payload = json.loads(execution.result)
-        except (TypeError, ValueError):
-            continue
-        rows = payload.get("rows") or []
-        if rows:
-            totals.append(sum(float(str(row[-1]).replace(",", "")) for row in rows))
-    return totals
 
 
 def drift_post_hook(run_output=None, **kwargs) -> None:
@@ -115,16 +151,17 @@ def drift_post_hook(run_output=None, **kwargs) -> None:
     if not isinstance(content, CopilotAnswer):
         return
 
-    for member_response in getattr(run_output, "member_responses", None) or []:
-        if getattr(member_response, "agent_id", None) != DRIFT_DETECTOR_MEMBER_ID:
-            continue
-        totals = _run_finops_query_totals(member_response)
-        if len(totals) < 2:
-            continue
-        older, newer = totals[0], totals[-1]
-        delta_pct = abs(newer - older) / abs(older) * 100 if older else (100.0 if newer else 0.0)
-        if delta_pct > DEFAULT_DRIFT_THRESHOLD_PCT:
-            content.drift_flag = True
+    totals = [
+        sum(float(str(row[-1]).replace(",", "")) for row in query["rows"])
+        for query in executed_queries(run_output)
+        if query["member_id"] == DRIFT_DETECTOR_MEMBER_ID and query["rows"]
+    ]
+    if len(totals) < 2:
+        return
+    older, newer = totals[0], totals[-1]
+    delta_pct = abs(newer - older) / abs(older) * 100 if older else (100.0 if newer else 0.0)
+    if delta_pct > DEFAULT_DRIFT_THRESHOLD_PCT:
+        content.drift_flag = True
 
 
 def _member(name: str, role: str, instructions: list[str], model: Model, include_propose_driver: bool = False) -> Agent:
@@ -158,10 +195,13 @@ def build_team(model: Model) -> Team:
 
     gap_explainer = _member(
         "gap-explainer",
-        role="Explains a plan-vs-actual gap using variance bridge data already computed by the recompute workflow.",
+        role="Explains a plan-vs-actual gap by bridging it through run_finops_query.",
         instructions=[
-            "Use run_finops_query with BRIDGE / COMPARE PLAN ... TO ACTUAL to pull the bridge legs.",
-            "Name the largest leg(s) driving the gap; never call a leg 'residual' unless it truly is the "
+            "Pull the bridge with run_finops_query: SELECT <one revenue or cost measure> "
+            "[BY practice|grade|company|account] WHERE ... FOR PERIOD ... [AS OF ...] "
+            "COMPARE PLAN pv='PV-2026-0001' TO ACTUAL BRIDGE.",
+            "Every row carries its legs, residual and tol, plus the vintage it read. Name the largest leg(s) "
+            "driving the gap and state the vintage; never call a leg 'residual' unless it truly is the "
             "unexplained remainder.",
         ],
         model=model,
@@ -171,17 +211,17 @@ def build_team(model: Model) -> Team:
         "driver-proposer",
         role="Proposes a new driver value or formula change when a planner asks for a what-if.",
         instructions=[
-            "Use propose_driver for the change itself; this call always requires human confirmation before "
-            "it executes -- say so explicitly rather than implying the change is already live.",
-            "A proposal is not a plan change: it still needs a Locked plan version and a signed-off "
-            "recompute before it affects anything published.",
+            "Use propose_driver for the change itself; it always requires human confirmation and only ever "
+            "records a Draft -- say so explicitly rather than implying the change is already live.",
+            "A proposal is not a plan change: a controller other than the proposer must approve it, and it "
+            "still needs a Locked plan version and a signed-off recompute before it affects anything published.",
         ],
         model=model,
         include_propose_driver=True,
     )
 
     drift_detector = _member(
-        "drift-detector",
+        DRIFT_DETECTOR_MEMBER_ID,
         role="Reconciles the two most recent ledger vintages for a metric and reports any disagreement.",
         instructions=[
             "Run the same run_finops_query twice, once AS OF each of the two most recent vintages, and "
@@ -200,8 +240,8 @@ def build_team(model: Model) -> Team:
         instructions=[
             "Decompose the planner's request: resolve scope, delegate to the member(s) that can answer it, "
             "then synthesize.",
-            "Every number in your final answer must be backed by a citations entry pointing at the exact "
-            "cube row and DSL that produced it.",
+            "Every number in your final answer must be backed by a citations entry whose `dsl` and `row` are "
+            "copied exactly from a run_finops_query result a member received; anything else is rejected.",
             "If the drift-detector member reports drift_flag=true, set drift_flag=true in your own output "
             "and mention it -- never omit a reported drift regardless of how the rest of the answer reads.",
         ],

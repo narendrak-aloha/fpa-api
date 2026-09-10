@@ -1,25 +1,20 @@
 """The authenticated HTTP boundary between the agent tier and everything
-else (Phase 12): caller identity is resolved from the request's API key to
-a `SecurityContext` here, once, and handed to the team via Agno
-dependencies -- never accepted from the request body, and never something
-the model itself can widen.
+else: the caller's identity (`fpa_be.api.auth`) becomes the team's row scope
+via Agno dependencies and its `user_id` -- never accepted from the request
+body, and never something the model itself can widen.
+
+The response carries a trace of which member ran which DSL, built from the
+tool executions themselves rather than from the model's own account.
 """
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from fpa_be.agents.model import default_model
-from fpa_be.agents.team import CopilotAnswer, build_team
-from fpa_be.compiler.security import SecurityContext
+from fpa_be.agents.team import build_team, executed_queries
+from fpa_be.api.auth import CurrentPrincipal
 
 router = APIRouter(prefix="/copilot", tags=["copilot"])
-
-# API key -> caller's row scope. A real deployment resolves this from an
-# identity provider (SSO/OIDC); this is the one place in the whole system
-# that authenticated identity becomes a SecurityContext.
-_API_KEYS: dict[str, SecurityContext] = {
-    "pl-planner-key": SecurityContext(allowed_companies=frozenset({"RTPL1"})),
-}
 
 _team = None
 
@@ -31,21 +26,32 @@ def _get_team():
     return _team
 
 
-def _authenticate(x_api_key: str | None) -> SecurityContext:
-    if x_api_key is None or x_api_key not in _API_KEYS:
-        raise HTTPException(status_code=401, detail="missing or invalid API key")
-    return _API_KEYS[x_api_key]
-
-
 class CopilotQuery(BaseModel):
     question: str
 
 
 @router.post("/query")
-async def query(body: CopilotQuery, x_api_key: str | None = Header(default=None)) -> CopilotAnswer:
-    security_context = _authenticate(x_api_key)
+async def query(body: CopilotQuery, principal: CurrentPrincipal):
     run_output = await _get_team().arun(
         body.question,
-        dependencies={"security_context": security_context},
+        user_id=principal.user,
+        dependencies={"security_context": principal.security_context},
     )
-    return run_output.content
+    trace = [
+        {"member_id": q["member_id"], "dsl": q["dsl"], "vintage": q["vintage"], "row_count": len(q["rows"])}
+        for q in executed_queries(run_output)
+    ]
+    if run_output.is_paused:
+        # A tool that requires confirmation (propose_driver) is waiting on a
+        # human; nothing it would record has been written yet.
+        pending = [
+            {
+                "member_id": r.member_agent_id,
+                "tool": r.tool_execution.tool_name,
+                "arguments": r.tool_execution.tool_args,
+            }
+            for r in run_output.active_requirements
+            if r.tool_execution is not None
+        ]
+        return {"status": "paused", "answer": None, "trace": trace, "pending_confirmations": pending}
+    return {"status": "answered", "answer": run_output.content, "trace": trace}

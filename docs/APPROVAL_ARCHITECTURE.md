@@ -20,6 +20,12 @@ nothing about plan-version state machines or Temporal workflows.
 directly writing) a driver change because a user's phrasing sounded like an
 instruction rather than a question.
 
+Even once confirmed, the tool only records a Draft `plan_driver_proposal`.
+A controller who is not the proposer resolves it (`/driver-proposals`, with
+`ck_plan_driver_proposal_no_self_approval` in Postgres), and approval is
+what writes `plan_driver`, so the agent tier and the plan spine agree on who
+approved what.
+
 ## 2. PostgreSQL governance approval (plan-version lifecycle)
 
 **Where:** `plan_version.state` transitions (`Draft -> In-Review -> Approved
@@ -53,6 +59,12 @@ restart, because it's Temporal history, not in-process state. This is a
 run-scoped gate: it approves one revision of one workflow execution, not a
 plan version's lifecycle (that's mechanism 2) and not an agent's tool call
 (that's mechanism 1).
+
+The signal is only sent by `POST /workflows/{id}/approve`, which requires a
+controller, refuses the person who requested the recompute, refuses unless
+the run is actually `awaiting_approval`, and writes an audit row against the
+plan version. Segregation of duties still holds here, enforced before the
+signal rather than discovered inside the workflow.
 
 **Failure mode it prevents:** an unattended recompute publishing a revision
 nobody looked at, and -- via Decision 3 (expire, don't escalate) -- a

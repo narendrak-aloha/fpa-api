@@ -20,7 +20,9 @@ from fpa_be.agents.team import (
     build_team,
     citation_post_hook,
     drift_post_hook,
+    executed_queries,
 )
+from fpa_be.masking.gate import disclosure_tool_hook
 
 
 def _tool_execution(tool_name, result):
@@ -63,6 +65,13 @@ class TestTeamStructure:
     def test_leader_has_citation_post_hook(self, team):
         assert citation_post_hook in team.post_hooks
 
+    def test_every_member_carries_the_masking_gate_innermost(self, team):
+        """Agno nests tool hooks first-outermost: the masking gate must be
+        last, so it wraps the tool directly and runs on every tool call."""
+        for member in team.members:
+            assert len(member.tool_hooks) == 2
+            assert member.tool_hooks[-1] is disclosure_tool_hook
+
     def test_leader_output_schema_is_copilot_answer(self, team):
         assert team.output_schema is CopilotAnswer
 
@@ -83,21 +92,49 @@ class TestNumbersIn:
         assert _numbers_in("Poland Q2 revenue was 41431076.19.") == {"41431076.19"}
 
 
+_DSL = "SELECT services_revenue WHERE geo_country = 'PL' FOR PERIOD 2026-Q2"
+_RESULT = json.dumps({"dsl": _DSL, "vintage": None, "columns": ["services_revenue"], "rows": [[41431076.19]]})
+
+
+def _ran(answer, results=(_RESULT,)):
+    return SimpleNamespace(content=answer, member_responses=[_member_response("query-answerer", list(results))])
+
+
 class TestCitationPostHook:
-    def test_passes_when_every_number_is_cited(self):
+    def test_passes_when_every_number_is_cited_from_a_query_that_ran(self):
         answer = CopilotAnswer(
             answer="Poland Q2 revenue was 41431076.19.",
-            citations=[Citation(dsl="SELECT services_revenue", row=["41431076.19"])],
+            citations=[Citation(dsl=_DSL, row=["41431076.19"])],
         )
-        citation_post_hook(run_output=SimpleNamespace(content=answer))
+        citation_post_hook(run_output=_ran(answer))
 
     def test_raises_when_a_number_has_no_citation(self):
         answer = CopilotAnswer(
             answer="Poland Q2 revenue was 999999999.99.",
-            citations=[Citation(dsl="SELECT services_revenue", row=["41431076.19"])],
+            citations=[Citation(dsl=_DSL, row=["41431076.19"])],
         )
         with pytest.raises(UncitedNumberError):
-            citation_post_hook(run_output=SimpleNamespace(content=answer))
+            citation_post_hook(run_output=_ran(answer))
+
+    def test_raises_when_the_citation_names_a_query_no_member_ran(self):
+        answer = CopilotAnswer(
+            answer="Poland Q2 revenue was 41431076.19.",
+            citations=[Citation(dsl="SELECT services_revenue FOR PERIOD 2026-Q3", row=["41431076.19"])],
+        )
+        with pytest.raises(UncitedNumberError, match="no member ran"):
+            citation_post_hook(run_output=_ran(answer))
+
+    def test_raises_when_the_model_invents_the_cited_row_itself(self):
+        answer = CopilotAnswer(
+            answer="Poland Q2 revenue was 999999999.99.",
+            citations=[Citation(dsl=_DSL, row=["999999999.99"])],
+        )
+        with pytest.raises(UncitedNumberError, match="was not returned"):
+            citation_post_hook(run_output=_ran(answer))
+
+    def test_executed_queries_carry_member_id_dsl_and_vintage(self):
+        [query] = executed_queries(_ran(CopilotAnswer(answer="")))
+        assert (query["member_id"], query["dsl"], query["vintage"]) == ("query-answerer", _DSL, None)
 
     def test_ignores_non_copilot_answer_content(self):
         citation_post_hook(run_output=SimpleNamespace(content="plain string, not a CopilotAnswer"))

@@ -69,6 +69,10 @@ from fpa_be.workflows.plan_recompute import (
 
 pytestmark = pytest.mark.asyncio
 
+ALICE = {"x-api-key": "alice-planner-key"}  # planner
+BOB = {"x-api-key": "bob-controller-key"}  # controller
+CAROL = {"x-api-key": "carol-controller-key"}  # controller
+
 PL_SCOPE = SecurityContext(allowed_companies=frozenset({"RTPL1"}))
 THREE_ENTITY_SCOPE = SecurityContext(allowed_companies=frozenset({"RTUS1", "RTUS2", "RTUS3"}))
 FOURTH_ENTITY = "RTCA1"
@@ -148,7 +152,9 @@ def _mock_activities(*, locked: bool = True, commit=None, compensate=None):
         bindings = dict(input.bindings)
         evaluated = []
         for name in input.driver_names:
-            value = eval_expr(parse_expr(input.formulas[name]), bindings)
+            value = input.shocked.get(name, None)
+            if value is None:
+                value = eval_expr(parse_expr(input.formulas[name]), bindings)
             bindings[name] = value
             evaluated.append(
                 acts.EvaluatedDriver(name=name, value=value, formula=input.formulas[name], inputs=dict(bindings))
@@ -169,11 +175,11 @@ def _mock_activities(*, locked: bool = True, commit=None, compensate=None):
         calls["rollback"] += 1
 
     @activity.defn(name="commit_to_treasury")
-    async def default_commit(input: acts.CommitToTreasuryInput) -> acts.CommitToTreasuryResult:
+    async def default_commit(input: acts.CommitmentInput) -> acts.CommitToTreasuryResult:
         return acts.CommitToTreasuryResult(commitment_id="commitment-123")
 
     @activity.defn(name="compensate_commitment")
-    async def default_compensate(input: acts.CompensateCommitmentInput) -> None:
+    async def default_compensate(input: acts.CommitmentInput) -> None:
         pass
 
     @activity.defn(name="compute_variance")
@@ -241,6 +247,66 @@ class _CommitmentServiceProcess:
             self._thread.join(timeout=5)
 
 
+async def _wait_for_compensation(handle, calls) -> None:
+    for _ in range(300):
+        progress = await handle.query(PlanRecomputeWorkflow.progress)
+        if progress["phase"] == "compensating" and calls["rollback"] == 1:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("the workflow never reached compensation")
+
+
+async def test_a_commitment_that_lands_after_a_timeout_is_still_reversed():
+    """The case an idempotency key exists for: every call to the Commitment
+    Service times out on the caller's side but is applied anyway. The commit
+    "fails", the commitment exists regardless, and the run must still end
+    with the cube and the ledger agreeing -- and with exactly one commitment,
+    because every retry reused the same key."""
+    real_client = await Client.connect("localhost:7233", namespace="default")
+    service = _CommitmentServiceProcess(port=18098)
+    base_url = service.start()
+    original = (acts.COMMITMENT_SERVICE_URL, acts.COMMITMENT_HTTP_TIMEOUT_SECONDS)
+    acts.COMMITMENT_SERVICE_URL, acts.COMMITMENT_HTTP_TIMEOUT_SECONDS = base_url, 0.3
+    try:
+        async with httpx.AsyncClient(base_url=base_url) as config_client:
+            (
+                await config_client.post(
+                    "/_config/failure-rate", json={"rate": 1.0, "mode": "timeout", "timeout_seconds": 1.0}
+                )
+            ).raise_for_status()
+            activities, calls = _mock_activities(
+                locked=True, commit=acts.commit_to_treasury, compensate=acts.compensate_commitment
+            )
+            tq = f"tq-commit-timeout-{uuid.uuid4()}"
+            async with Worker(
+                real_client, task_queue=tq, workflows=[PlanRecomputeWorkflow, PartitionRecomputeWorkflow],
+                activities=activities,
+            ):
+                handle = await real_client.start_workflow(
+                    PlanRecomputeWorkflow.run,
+                    _input(plan_version_id=str(uuid.uuid4())),
+                    id=f"wf-commit-timeout-{uuid.uuid4()}",
+                    task_queue=tq,
+                )
+                await handle.signal(PlanRecomputeWorkflow.approve, "cfo@example.com")
+                await _wait_for_compensation(handle, calls)
+                for _ in range(50):
+                    if service.module._commitments:
+                        break
+                    await asyncio.sleep(0.1)
+                assert len(service.module._commitments) == 1, "the timed-out commit should have landed anyway"
+
+                (await config_client.post("/_config/failure-rate", json={"rate": 0.0})).raise_for_status()
+                result = await handle.result()
+    finally:
+        acts.COMMITMENT_SERVICE_URL, acts.COMMITMENT_HTTP_TIMEOUT_SECONDS = original
+        service.stop()
+
+    assert result.status == "Rejected"
+    assert calls["rollback"] == 1
+    assert [c["status"] for c in service.module._commitments.values()] == ["reversed"]
+
+
 async def test_full_acceptance_walkthrough_mirrors_evaluator_sequence(
     client, superuser_conn, app_conn, ch_client
 ):
@@ -255,27 +321,31 @@ async def test_full_acceptance_walkthrough_mirrors_evaluator_sequence(
     )
 
     # -- Step 3: create plan -------------------------------------------
-    resp = await client.post("/plan-versions", json={"plan_code": "PV-ACCEPTANCE", "requested_by": "alice"})
+    # Authored by a controller, so step 4's refusal is segregation of duties
+    # itself -- not merely the planner role lacking approve rights.
+    resp = await client.post("/plan-versions", json={"plan_code": "PV-ACCEPTANCE"}, headers=BOB)
     assert resp.status_code == 201
     plan = resp.json()
     assert plan["state"] == "Draft"
+    assert plan["requested_by"] == "bob"
 
-    resp = await client.post(f"/plan-versions/{plan['id']}/submit", json={"actor": "alice"})
+    resp = await client.post(f"/plan-versions/{plan['id']}/submit", headers=ALICE)
     assert resp.status_code == 200
     assert resp.json()["state"] == "In-Review"
 
     # -- Step 4: self approve -> FAIL -----------------------------------
-    resp = await client.post(f"/plan-versions/{plan['id']}/approve", json={"actor": "alice"})
+    resp = await client.post(f"/plan-versions/{plan['id']}/approve", headers=BOB)
     assert resp.status_code == 403
-    assert (await client.get(f"/plan-versions/{plan['id']}")).json()["state"] == "In-Review"
+    assert "self-approved" in resp.json()["detail"]
+    assert (await client.get(f"/plan-versions/{plan['id']}", headers=ALICE)).json()["state"] == "In-Review"
 
     # -- Step 5: second user approve -> PASS ----------------------------
-    resp = await client.post(f"/plan-versions/{plan['id']}/approve", json={"actor": "bob"})
+    resp = await client.post(f"/plan-versions/{plan['id']}/approve", headers=CAROL)
     assert resp.status_code == 200
     assert resp.json()["state"] == "Approved"
 
     # -- Step 6: lock ----------------------------------------------------
-    resp = await client.post(f"/plan-versions/{plan['id']}/lock", json={"actor": "bob"})
+    resp = await client.post(f"/plan-versions/{plan['id']}/lock", headers=CAROL)
     assert resp.status_code == 200
     assert resp.json()["state"] == "Locked"
 
@@ -284,9 +354,9 @@ async def test_full_acceptance_walkthrough_mirrors_evaluator_sequence(
     # directly (lines are only ever written by the recompute workflow); the
     # API-level "edit locked" attack surface is re-submitting/re-approving a
     # Locked plan_version, which the state_transition table must refuse.
-    resp = await client.post(f"/plan-versions/{plan['id']}/submit", json={"actor": "alice"})
+    resp = await client.post(f"/plan-versions/{plan['id']}/submit", headers=ALICE)
     assert resp.status_code == 409
-    resp = await client.post(f"/plan-versions/{plan['id']}/approve", json={"actor": "bob"})
+    resp = await client.post(f"/plan-versions/{plan['id']}/approve", headers=CAROL)
     assert resp.status_code == 409
 
     # -- Step 8: psql edit -> FAIL (same, now-Locked plan_version) -------
@@ -303,6 +373,9 @@ async def test_full_acceptance_walkthrough_mirrors_evaluator_sequence(
         await superuser_conn.execute("UPDATE plan_version_line SET quantity = 999 WHERE id = $1", line_id)
     with pytest.raises(asyncpg.RaiseError):
         await superuser_conn.execute("DELETE FROM plan_version_line WHERE id = $1", line_id)
+    # The Locked plan_version row itself is immutable too, not only its lines.
+    with pytest.raises(asyncpg.RaiseError):
+        await superuser_conn.execute("UPDATE plan_version SET plan_code = 'EDITED' WHERE id = $1", plan["id"])
 
     # The app role can't bypass the column-level grant either: covenant_breach
     # stays controller-only no matter which connection role attempts the write.
@@ -409,7 +482,7 @@ async def test_full_acceptance_walkthrough_mirrors_evaluator_sequence(
 
     guardrail = CubeDataInjectionGuardrail()
     for (hostile_name,) in hostile_rows:
-        quarantined = guardrail.screen_tool_result(
+        quarantined = await guardrail.screen_tool_result(
             function_name="run_finops_query",
             function_call=lambda name=hostile_name, **_: name,
             arguments={},
@@ -499,12 +572,11 @@ async def test_full_acceptance_walkthrough_mirrors_evaluator_sequence(
     # mock standing in for the failure.
     service = _CommitmentServiceProcess(port=18099)
     base_url = service.start()
+    original_url = acts.COMMITMENT_SERVICE_URL
+    acts.COMMITMENT_SERVICE_URL = base_url
     try:
-        async with httpx.AsyncClient() as config_client:
-            (await config_client.post(f"{base_url}/_config/failure-rate", json={"rate": 1.0})).raise_for_status()
-        original_url = acts.COMMITMENT_SERVICE_URL
-        acts.COMMITMENT_SERVICE_URL = base_url
-        try:
+        async with httpx.AsyncClient(base_url=base_url) as config_client:
+            (await config_client.post("/_config/failure-rate", json={"rate": 1.0})).raise_for_status()
             real_commit_activities, real_calls = _mock_activities(
                 locked=True, commit=acts.commit_to_treasury, compensate=acts.compensate_commitment
             )
@@ -520,19 +592,27 @@ async def test_full_acceptance_walkthrough_mirrors_evaluator_sequence(
                     task_queue=tq,
                 )
                 await h.signal(PlanRecomputeWorkflow.approve, "cfo@example.com")
+
+                # Every commit attempt 500s. The cube publish is rolled back,
+                # and the run then keeps trying to reverse the commitment: it
+                # does not finish while the ledger's state is unknown.
+                await _wait_for_compensation(h, real_calls)
+                assert real_calls["publish"] == 1
+                # consistent while the counterparty is down: cube rolled back, ledger empty
+                assert service.module._commitments == {}
+
+                # The counterparty recovers; compensation completes.
+                (await config_client.post("/_config/failure-rate", json={"rate": 0.0})).raise_for_status()
                 result_fail = await h.result()
-        finally:
-            acts.COMMITMENT_SERVICE_URL = original_url
     finally:
+        acts.COMMITMENT_SERVICE_URL = original_url
         service.stop()
 
     assert result_fail.status == "Rejected"
     assert "rolled back" in result_fail.reason
-    assert real_calls["publish"] == 1
-    assert real_calls["rollback"] == 1
-    # the real service never actually created a commitment (it 500s before
-    # ever reaching that branch), so nothing was left half-applied there.
-    assert service.module._commitments == {}
+    # Compensation claimed this revision's idempotency key and reversed it, so
+    # nothing is active in the ledger and a late original could add nothing.
+    assert [c["status"] for c in service.module._commitments.values()] == ["reversed"]
 
     # -- Step 23: bridge reconciliation at every rollup level ----------------
     from fpa_be.bridge.decompose import revenue_bridge

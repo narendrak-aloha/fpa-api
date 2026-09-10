@@ -16,6 +16,7 @@ TRUNCATE_TABLES = (
     "plan_fx_rate",
     "plan_version_line",
     "plan_driver",
+    "plan_driver_proposal",
     "plan_version",
 )
 
