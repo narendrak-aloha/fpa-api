@@ -76,6 +76,9 @@ services:
       - "8000:8000"
     volumes:
       - ..:/app
+      # Claude Code CLI and login from the host, so provider `claude-code` works in the container
+      - ${HOME}/.local/share/claude:/opt/claude:ro
+      - ${HOME}/.claude:/root/.claude
     depends_on:
       postgres:
         condition: service_healthy

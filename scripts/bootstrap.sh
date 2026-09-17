@@ -4,6 +4,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+PY="${PYTHON:-$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)}"
+echo "==> checking dependencies"
+"$PY" -m pip install --quiet --disable-pip-version-check -r requirements.txt
+
 echo "==> docker compose up -d"
 docker compose -f docker/docker-compose.yml up -d
 

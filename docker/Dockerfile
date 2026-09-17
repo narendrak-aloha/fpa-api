@@ -8,9 +8,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl postgresql-client \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements-api.txt ./
-RUN pip install --no-cache-dir -r requirements-api.txt \
-    "alembic>=1.16" "sqlalchemy>=2.0" "psycopg[binary]>=3.1" "pyyaml>=6" "faker>=40" "numpy>=2"
+# uv resolves and installs far faster than pip, and needs no virtualenv here.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+COPY requirements.txt ./
+RUN uv pip install --system --no-cache -r requirements.txt
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
