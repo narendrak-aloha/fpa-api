@@ -1,0 +1,1724 @@
+# Deterministic governance seed for the supplied cube manifest (data/out/cube_manifest.json).
+# Same data as 002_seed.sql. Each entry is one row; `table` names the target <schema>.<table>.
+# Load with: python -m db.seed   (idempotent: existing rows are left unchanged)
+
+# role (5 rows)
+- table: fpa_governance.role
+  role_code: analyst
+  description: Read governed plans and analytical results
+
+- table: fpa_governance.role
+  role_code: planner
+  description: Create and revise draft plans
+
+- table: fpa_governance.role
+  role_code: controller
+  description: Maintain rates/covenants and approve plans
+
+- table: fpa_governance.role
+  role_code: cfo
+  description: Approve and lock plans
+
+- table: fpa_governance.role
+  role_code: service
+  description: Service identity for workflow publication
+
+# app_user (4 rows)
+- table: fpa_governance.app_user
+  user_id: u-planner
+  display_name: Priya Planner
+  email: priya.planner@realtech.example
+
+- table: fpa_governance.app_user
+  user_id: u-controller
+  display_name: Chris Controller
+  email: chris.controller@realtech.example
+
+- table: fpa_governance.app_user
+  user_id: u-cfo
+  display_name: Casey CFO
+  email: casey.cfo@realtech.example
+
+- table: fpa_governance.app_user
+  user_id: svc-temporal
+  display_name: Temporal Workflow
+  email: temporal@realtech.example
+
+# user_role (7 rows)
+# One row per user/role membership.
+- table: fpa_governance.user_role
+  user_id: u-planner
+  role_code: planner
+
+- table: fpa_governance.user_role
+  user_id: u-planner
+  role_code: analyst
+
+- table: fpa_governance.user_role
+  user_id: u-controller
+  role_code: controller
+
+- table: fpa_governance.user_role
+  user_id: u-controller
+  role_code: analyst
+
+- table: fpa_governance.user_role
+  user_id: u-cfo
+  role_code: cfo
+
+- table: fpa_governance.user_role
+  user_id: u-cfo
+  role_code: controller
+
+- table: fpa_governance.user_role
+  user_id: svc-temporal
+  role_code: service
+
+# dim_company (20 rows)
+- table: fpa_governance.dim_company
+  company_code: RTUS1
+  company_name: RealTech US Operations 1
+  country_code: US
+  region: AMER
+  functional_currency: USD
+
+- table: fpa_governance.dim_company
+  company_code: RTUS2
+  company_name: RealTech US Operations 2
+  country_code: US
+  region: AMER
+  functional_currency: USD
+
+- table: fpa_governance.dim_company
+  company_code: RTUS3
+  company_name: RealTech US Operations 3
+  country_code: US
+  region: AMER
+  functional_currency: USD
+
+- table: fpa_governance.dim_company
+  company_code: RTCA1
+  company_name: RealTech CA Operations 1
+  country_code: CA
+  region: AMER
+  functional_currency: CAD
+
+- table: fpa_governance.dim_company
+  company_code: RTCA2
+  company_name: RealTech CA Operations 2
+  country_code: CA
+  region: AMER
+  functional_currency: CAD
+
+- table: fpa_governance.dim_company
+  company_code: RTUK1
+  company_name: RealTech UK Operations 1
+  country_code: UK
+  region: EMEA
+  functional_currency: GBP
+
+- table: fpa_governance.dim_company
+  company_code: RTUK2
+  company_name: RealTech UK Operations 2
+  country_code: UK
+  region: EMEA
+  functional_currency: GBP
+
+- table: fpa_governance.dim_company
+  company_code: RTDE1
+  company_name: RealTech DE Operations 1
+  country_code: DE
+  region: EMEA
+  functional_currency: EUR
+
+- table: fpa_governance.dim_company
+  company_code: RTDE2
+  company_name: RealTech DE Operations 2
+  country_code: DE
+  region: EMEA
+  functional_currency: EUR
+
+- table: fpa_governance.dim_company
+  company_code: RTPL1
+  company_name: RealTech PL Operations 1
+  country_code: PL
+  region: EMEA
+  functional_currency: PLN
+
+- table: fpa_governance.dim_company
+  company_code: RTPL2
+  company_name: RealTech PL Operations 2
+  country_code: PL
+  region: EMEA
+  functional_currency: PLN
+
+- table: fpa_governance.dim_company
+  company_code: RTPL3
+  company_name: RealTech PL Operations 3
+  country_code: PL
+  region: EMEA
+  functional_currency: PLN
+
+- table: fpa_governance.dim_company
+  company_code: RTAE1
+  company_name: RealTech AE Operations 1
+  country_code: AE
+  region: EMEA
+  functional_currency: AED
+
+- table: fpa_governance.dim_company
+  company_code: RTIN1
+  company_name: RealTech IN Operations 1
+  country_code: IN
+  region: APAC
+  functional_currency: INR
+
+- table: fpa_governance.dim_company
+  company_code: RTIN2
+  company_name: RealTech IN Operations 2
+  country_code: IN
+  region: APAC
+  functional_currency: INR
+
+- table: fpa_governance.dim_company
+  company_code: RTIN3
+  company_name: RealTech IN Operations 3
+  country_code: IN
+  region: APAC
+  functional_currency: INR
+
+- table: fpa_governance.dim_company
+  company_code: RTSG1
+  company_name: RealTech SG Operations 1
+  country_code: SG
+  region: APAC
+  functional_currency: SGD
+
+- table: fpa_governance.dim_company
+  company_code: RTSG2
+  company_name: RealTech SG Operations 2
+  country_code: SG
+  region: APAC
+  functional_currency: SGD
+
+- table: fpa_governance.dim_company
+  company_code: RTAU1
+  company_name: RealTech AU Operations 1
+  country_code: AU
+  region: APAC
+  functional_currency: AUD
+
+- table: fpa_governance.dim_company
+  company_code: RTAU2
+  company_name: RealTech AU Operations 2
+  country_code: AU
+  region: APAC
+  functional_currency: AUD
+
+# dim_account (25 rows)
+- table: fpa_governance.dim_account
+  account_code: '41000'
+  account_name: Services Revenue - Time and Materials
+  account_type: Revenue
+  engine_tag: Services
+
+- table: fpa_governance.dim_account
+  account_code: '41010'
+  account_name: Services Revenue - Fixed Fee
+  account_type: Revenue
+  engine_tag: Services
+
+- table: fpa_governance.dim_account
+  account_code: '41020'
+  account_name: Services Revenue - Change Orders
+  account_type: Revenue
+  engine_tag: Services
+
+- table: fpa_governance.dim_account
+  account_code: '41100'
+  account_name: Subscription Revenue
+  account_type: Revenue
+  engine_tag: Recurring
+
+- table: fpa_governance.dim_account
+  account_code: '41200'
+  account_name: Usage Revenue
+  account_type: Revenue
+  engine_tag: Recurring
+
+- table: fpa_governance.dim_account
+  account_code: '41300'
+  account_name: Support and Maintenance Revenue
+  account_type: Revenue
+  engine_tag: Recurring
+
+- table: fpa_governance.dim_account
+  account_code: '41400'
+  account_name: Rebillable Expense Revenue
+  account_type: Revenue
+  engine_tag: Services
+
+- table: fpa_governance.dim_account
+  account_code: '51000'
+  account_name: Delivery Payroll
+  account_type: COGS
+  engine_tag: Services
+
+- table: fpa_governance.dim_account
+  account_code: '51050'
+  account_name: Delivery Bonus and Incentive
+  account_type: COGS
+  engine_tag: Services
+
+- table: fpa_governance.dim_account
+  account_code: '51100'
+  account_name: Subcontractor Cost
+  account_type: COGS
+  engine_tag: Services
+
+- table: fpa_governance.dim_account
+  account_code: '51200'
+  account_name: Cloud Hosting
+  account_type: COGS
+  engine_tag: Recurring
+
+- table: fpa_governance.dim_account
+  account_code: '51250'
+  account_name: Third Party Software - Resold
+  account_type: COGS
+  engine_tag: Recurring
+
+- table: fpa_governance.dim_account
+  account_code: '51300'
+  account_name: Rebillable Travel
+  account_type: COGS
+  engine_tag: Services
+
+- table: fpa_governance.dim_account
+  account_code: '51400'
+  account_name: Customer Support Payroll
+  account_type: COGS
+  engine_tag: Recurring
+
+- table: fpa_governance.dim_account
+  account_code: '51500'
+  account_name: Intercompany Delivery Cost
+  account_type: COGS
+  engine_tag: Shared
+
+- table: fpa_governance.dim_account
+  account_code: '61000'
+  account_name: Sales Payroll
+  account_type: OpEx
+  engine_tag: Shared
+
+- table: fpa_governance.dim_account
+  account_code: '61100'
+  account_name: Marketing Programs
+  account_type: OpEx
+  engine_tag: Shared
+
+- table: fpa_governance.dim_account
+  account_code: '61200'
+  account_name: Sales Commission
+  account_type: OpEx
+  engine_tag: Shared
+
+- table: fpa_governance.dim_account
+  account_code: '62000'
+  account_name: Research and Development Payroll
+  account_type: OpEx
+  engine_tag: Recurring
+
+- table: fpa_governance.dim_account
+  account_code: '62100'
+  account_name: Product Tooling
+  account_type: OpEx
+  engine_tag: Recurring
+
+- table: fpa_governance.dim_account
+  account_code: '63000'
+  account_name: General and Administrative Payroll
+  account_type: OpEx
+  engine_tag: Shared
+
+- table: fpa_governance.dim_account
+  account_code: '63100'
+  account_name: Facilities and Occupancy
+  account_type: OpEx
+  engine_tag: Shared
+
+- table: fpa_governance.dim_account
+  account_code: '63200'
+  account_name: Professional Fees
+  account_type: OpEx
+  engine_tag: Shared
+
+- table: fpa_governance.dim_account
+  account_code: '63300'
+  account_name: Software Subscriptions
+  account_type: OpEx
+  engine_tag: Shared
+
+- table: fpa_governance.dim_account
+  account_code: '64000'
+  account_name: Depreciation and Amortisation
+  account_type: OpEx
+  engine_tag: Shared
+
+# dim_cost_center (54 rows)
+# One cost centre per country and practice.
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AE-CLOU
+  country_code: AE
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AE-CYBE
+  country_code: AE
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AE-DATA
+  country_code: AE
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AE-ERPD
+  country_code: AE
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AE-MANA
+  country_code: AE
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AE-PROD
+  country_code: AE
+  practice_code: PROD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AU-CLOU
+  country_code: AU
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AU-CYBE
+  country_code: AU
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AU-DATA
+  country_code: AU
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AU-ERPD
+  country_code: AU
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AU-MANA
+  country_code: AU
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-AU-PROD
+  country_code: AU
+  practice_code: PROD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-CA-CLOU
+  country_code: CA
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-CA-CYBE
+  country_code: CA
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-CA-DATA
+  country_code: CA
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-CA-ERPD
+  country_code: CA
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-CA-MANA
+  country_code: CA
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-CA-PROD
+  country_code: CA
+  practice_code: PROD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-DE-CLOU
+  country_code: DE
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-DE-CYBE
+  country_code: DE
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-DE-DATA
+  country_code: DE
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-DE-ERPD
+  country_code: DE
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-DE-MANA
+  country_code: DE
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-DE-PROD
+  country_code: DE
+  practice_code: PROD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-IN-CLOU
+  country_code: IN
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-IN-CYBE
+  country_code: IN
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-IN-DATA
+  country_code: IN
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-IN-ERPD
+  country_code: IN
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-IN-MANA
+  country_code: IN
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-IN-PROD
+  country_code: IN
+  practice_code: PROD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-PL-CLOU
+  country_code: PL
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-PL-CYBE
+  country_code: PL
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-PL-DATA
+  country_code: PL
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-PL-ERPD
+  country_code: PL
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-PL-MANA
+  country_code: PL
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-PL-PROD
+  country_code: PL
+  practice_code: PROD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-SG-CLOU
+  country_code: SG
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-SG-CYBE
+  country_code: SG
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-SG-DATA
+  country_code: SG
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-SG-ERPD
+  country_code: SG
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-SG-MANA
+  country_code: SG
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-SG-PROD
+  country_code: SG
+  practice_code: PROD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-UK-CLOU
+  country_code: UK
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-UK-CYBE
+  country_code: UK
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-UK-DATA
+  country_code: UK
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-UK-ERPD
+  country_code: UK
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-UK-MANA
+  country_code: UK
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-UK-PROD
+  country_code: UK
+  practice_code: PROD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-US-CLOU
+  country_code: US
+  practice_code: CLOU
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-US-CYBE
+  country_code: US
+  practice_code: CYBE
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-US-DATA
+  country_code: US
+  practice_code: DATA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-US-ERPD
+  country_code: US
+  practice_code: ERPD
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-US-MANA
+  country_code: US
+  practice_code: MANA
+
+- table: fpa_governance.dim_cost_center
+  cost_center_code: CC-US-PROD
+  country_code: US
+  practice_code: PROD
+
+# ledger_vintage (2 rows)
+- table: fpa_governance.ledger_vintage
+  vintage: 1
+  closed_at: 2026-07-05 18:00:00+00:00
+  note: original Q2 close
+
+- table: fpa_governance.ledger_vintage
+  vintage: 2
+  closed_at: 2026-08-12 09:30:00+00:00
+  note: Q2 restatement
+
+# planning_model (1 row)
+- table: fpa_governance.planning_model
+  model_code: FPA-2026
+  model_name: RealTech FY2026 Reforecast
+  plan_year: 2026
+  reporting_currency: USD
+  calc_order_dag:
+  - driver: heads
+    depends_on: []
+  - driver: available_hours
+    depends_on:
+    - heads
+  - driver: utilisation
+    depends_on:
+    - available_hours
+  - driver: bill_rate
+    depends_on: []
+  - driver: realisation
+    depends_on:
+    - bill_rate
+  - driver: attach_rate
+    depends_on:
+    - heads
+  created_by: u-controller
+
+# planning_dimension (19 rows)
+# model_code is resolved to planning_model.model_id when loading.
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: billing_type
+  ordinal: 1
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: business_unit
+  ordinal: 2
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: channel
+  ordinal: 3
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: contract
+  ordinal: 4
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: cost_center
+  ordinal: 5
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: cost_pool
+  ordinal: 6
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: customer
+  ordinal: 7
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: delivery_shore
+  ordinal: 8
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: engine
+  ordinal: 9
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: funding_source
+  ordinal: 10
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: geo_country
+  ordinal: 11
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: geo_region
+  ordinal: 12
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: grade
+  ordinal: 13
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: intercompany_flag
+  ordinal: 14
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: practice
+  ordinal: 15
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: product
+  ordinal: 16
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: project
+  ordinal: 17
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: resource_employee
+  ordinal: 18
+
+- table: fpa_governance.planning_dimension
+  model_code: FPA-2026
+  dimension_code: revenue_type
+  ordinal: 19
+
+# planning_measure (8 rows)
+# model_code is resolved to planning_model.model_id when loading.
+- table: fpa_governance.planning_measure
+  model_code: FPA-2026
+  measure_code: services_revenue
+  aggregation_type: additive
+  sql_expression: sumIf(amount_functional, account IN ('41000','41010','41020','41400'))
+  available: true
+
+- table: fpa_governance.planning_measure
+  model_code: FPA-2026
+  measure_code: delivery_cost
+  aggregation_type: additive
+  sql_expression: sumIf(amount_functional, account IN ('51000','51050','51100','51300','51500'))
+  available: true
+
+- table: fpa_governance.planning_measure
+  model_code: FPA-2026
+  measure_code: gross_margin
+  aggregation_type: additive
+  sql_expression: services_revenue - delivery_cost
+  available: true
+
+- table: fpa_governance.planning_measure
+  model_code: FPA-2026
+  measure_code: utilisation
+  aggregation_type: ratio
+  sql_expression: billable_quantity / nullIf(delivery_quantity, 0)
+  available: true
+
+- table: fpa_governance.planning_measure
+  model_code: FPA-2026
+  measure_code: realisation
+  aggregation_type: ratio
+  sql_expression: revenue_amount / nullIf(billable_quantity, 0)
+  available: true
+
+- table: fpa_governance.planning_measure
+  model_code: FPA-2026
+  measure_code: gross_margin_pct
+  aggregation_type: ratio
+  sql_expression: gross_margin / nullIf(services_revenue, 0)
+  available: true
+
+- table: fpa_governance.planning_measure
+  model_code: FPA-2026
+  measure_code: headcount
+  aggregation_type: semi_additive
+  sql_expression: uniq(resource_employee)
+  available: true
+
+- table: fpa_governance.planning_measure
+  model_code: FPA-2026
+  measure_code: open_pipeline
+  aggregation_type: semi_additive
+  sql_expression: '0'
+  available: false
+
+# plan_driver (6 rows)
+# model_code is resolved to planning_model.model_id when loading.
+- table: fpa_governance.plan_driver
+  model_code: FPA-2026
+  driver_code: heads
+  driver_name: Delivery heads
+  formula: heads * (1 - attrition)
+  effective_from: 2026-01-01
+  unit: people
+  value_type: count
+  created_by: u-controller
+
+- table: fpa_governance.plan_driver
+  model_code: FPA-2026
+  driver_code: available_hours
+  driver_name: Available delivery hours
+  formula: heads * 160
+  effective_from: 2026-01-01
+  unit: hours
+  value_type: count
+  created_by: u-controller
+
+- table: fpa_governance.plan_driver
+  model_code: FPA-2026
+  driver_code: utilisation
+  driver_name: Delivery utilisation
+  formula: billable_hours / available_hours
+  effective_from: 2026-01-01
+  unit: ratio
+  value_type: percentage
+  created_by: u-controller
+
+- table: fpa_governance.plan_driver
+  model_code: FPA-2026
+  driver_code: bill_rate
+  driver_name: Blended bill rate
+  formula: prior_period(bill_rate) * (1 + rate_increase)
+  effective_from: 2026-01-01
+  unit: USD/hour
+  value_type: currency
+  created_by: u-controller
+
+- table: fpa_governance.plan_driver
+  model_code: FPA-2026
+  driver_code: realisation
+  driver_name: Revenue realisation
+  formula: bill_rate * realisation_factor
+  effective_from: 2026-01-01
+  unit: ratio
+  value_type: percentage
+  created_by: u-controller
+
+- table: fpa_governance.plan_driver
+  model_code: FPA-2026
+  driver_code: attach_rate
+  driver_name: Support attach rate
+  formula: support_customers / customers
+  effective_from: 2026-01-01
+  unit: ratio
+  value_type: percentage
+  created_by: u-controller
+
+# plan_state_transition (6 rows)
+- table: fpa_governance.plan_state_transition
+  from_state: DRAFT
+  to_state: IN_REVIEW
+  role_code: planner
+
+- table: fpa_governance.plan_state_transition
+  from_state: IN_REVIEW
+  to_state: APPROVED
+  role_code: controller
+
+- table: fpa_governance.plan_state_transition
+  from_state: IN_REVIEW
+  to_state: REJECTED
+  role_code: controller
+
+- table: fpa_governance.plan_state_transition
+  from_state: APPROVED
+  to_state: LOCKED
+  role_code: cfo
+
+- table: fpa_governance.plan_state_transition
+  from_state: APPROVED
+  to_state: SUPERSEDED
+  role_code: planner
+
+- table: fpa_governance.plan_state_transition
+  from_state: REJECTED
+  to_state: DRAFT
+  role_code: planner
+
+# plan_version (1 row)
+# model_code is resolved to planning_model.model_id when loading.
+- table: fpa_governance.plan_version
+  plan_version_code: PV-2026-0001
+  model_code: FPA-2026
+  plan_year: 2026
+  state: DRAFT
+  covenant_ok: false
+  covenant_note: Seed version awaiting covenant review
+  requested_by: u-planner
+
+# scenario_set (3 rows)
+# plan_version_code is resolved to plan_version.plan_version_id when loading.
+- table: fpa_governance.scenario_set
+  plan_version_code: PV-2026-0001
+  scenario_code: base
+  scenario_name: Base plan
+  is_base: true
+
+- table: fpa_governance.scenario_set
+  plan_version_code: PV-2026-0001
+  scenario_code: stretch
+  scenario_name: Stretch case
+  is_base: false
+
+- table: fpa_governance.scenario_set
+  plan_version_code: PV-2026-0001
+  scenario_code: downside
+  scenario_name: Downside case
+  is_base: false
+
+# plan_fx_rate (108 rows)
+# Pinned plan FX to USD per currency and month. plan_version_code is resolved to plan_version.plan_version_id.
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: CAD
+  to_currency: USD
+  rate: '1.36'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: GBP
+  to_currency: USD
+  rate: '0.79'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: EUR
+  to_currency: USD
+  rate: '0.92'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: PLN
+  to_currency: USD
+  rate: '4.05'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: AED
+  to_currency: USD
+  rate: '3.6725'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: INR
+  to_currency: USD
+  rate: '83.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: SGD
+  to_currency: USD
+  rate: '1.34'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: AUD
+  to_currency: USD
+  rate: '1.52'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-01-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-02-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-03-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-04-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-05-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-06-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-07-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-08-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-09-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-10-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-11-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+- table: fpa_governance.plan_fx_rate
+  plan_version_code: PV-2026-0001
+  period_month: 2026-12-01
+  from_currency: USD
+  to_currency: USD
+  rate: '1.00'
+
+# audit_event (1 row)
+# event_hash is computed when loading: sha256("actor|entity_type|entity_id|action|<compact payload JSON>").
+- table: fpa_governance.audit_event
+  actor_user_id: u-controller
+  entity_type: plan_version
+  entity_id: PV-2026-0001
+  action: SEEDED
+  payload:
+    source: out/cube_manifest.json
+    seed: 002_seed.sql
+  previous_hash: null
