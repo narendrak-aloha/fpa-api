@@ -13,6 +13,11 @@ services:
         hard: 262144
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --password $$CLICKHOUSE_PASSWORD --query 'SELECT 1' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   temporal:
     image: temporalio/temporal:latest
@@ -34,6 +39,48 @@ services:
       - "5431:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fpa"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  fpa-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: fpa-dev-1
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      # Postgres (service name, not the published host port)
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: fpa
+      FPA_GOVERNANCE_DB_URL: postgresql+psycopg://postgres:fpa@postgres:5432/fpa
+      # ClickHouse
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: fpa
+      CH_HOST: clickhouse
+      CH_PORT: 8123
+      CH_USER: default
+      CH_PASSWORD: fpa
+      PYTHON: python3
+      PYTHONPATH: /app/src
+      # LLM providers: claude-api and gemini work in the container
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ..:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
 
 volumes:
   clickhouse_data:

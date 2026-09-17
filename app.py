@@ -10,6 +10,7 @@ Env:  CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -19,7 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -33,6 +34,23 @@ from fpa_project.agent_team import (  # noqa: E402
 from fpa_project.dsl import DSLValidationError, ParseError, SecurityContext, compile_query  # noqa: E402
 
 app = FastAPI(title="FPA Query API", version="1.0.0")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+log = logging.getLogger("fpa.api")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    started = time.monotonic()
+    response = await call_next(request)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    # Query details are attached by the handler; other routes log the basics only.
+    detail = getattr(request.state, "log_detail", "")
+    log.info(
+        "%s %s -> %s %dms%s",
+        request.method, request.url.path, response.status_code, duration_ms, f" {detail}" if detail else "",
+    )
+    return response
 
 MANIFEST = ROOT / "data" / "out" / "cube_manifest.json"
 ALL_COMPANIES = frozenset(c["company"] for c in json.loads(MANIFEST.read_text())["companies"]) if MANIFEST.exists() else frozenset()
@@ -101,8 +119,9 @@ def _jsonable(value: Any) -> Any:
 
 
 @app.post("/api/v1/query", response_model=QueryResponse)
-def query(req: QueryRequest) -> QueryResponse:
+def query(req: QueryRequest, http_request: Request) -> QueryResponse:
     started = time.monotonic()
+    log.info("query received | provider=%s companies=%s | %r", req.provider, len(req.companies or ALL_COMPANIES), req.query[:120])
     # Scope comes from the caller, never from the model or DSL text.
     companies = frozenset(req.companies) if req.companies else ALL_COMPANIES
     scope = UserScope(user_id="web-ui", allowed_companies=companies, max_estimated_rows=req.max_rows)
@@ -112,6 +131,7 @@ def query(req: QueryRequest) -> QueryResponse:
         return int((time.monotonic() - started) * 1000)
 
     def fail(message: str) -> QueryResponse:
+        http_request.state.log_detail = f"| provider={req.provider} status=NOT_RUN error={message[:120]!r}"
         return QueryResponse(
             agent_response=AgentFPAResponse(user_query=text, execution_status="VALIDATION_ERROR", error_message=message),
             provider=req.provider, mode="not_run", duration_ms=elapsed(),
@@ -156,6 +176,10 @@ def query(req: QueryRequest) -> QueryResponse:
         except (ParseError, DSLValidationError, ValueError):
             pass
     response.duration_ms = elapsed()
+    http_request.state.log_detail = (
+        f"| provider={response.provider} mode={response.mode} status={result.execution_status} "
+        f"rows={len(result.cited_data_rows)} dsl={result.generated_dsl!r}"
+    )
     return response
 
 

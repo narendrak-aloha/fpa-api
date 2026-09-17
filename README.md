@@ -9,6 +9,14 @@ static schema snapshot derived from `seed_fpa.py`, and emits parameterised SQL.
 
 ```text
 fpa-project/
+  Makefile                     docker-local-run / -stop / -logs, docker-seed-db, docker-reinit,
+                               docker-make-migrations, docker-migrate*, docker-shell (make help)
+  docker/docker-compose.yml    ClickHouse, Postgres, Temporal and the fpa-dev-1 app container
+  docker/Dockerfile            Image for fpa-dev-1: API, Alembic migrations and both seeders
+  scripts/bootstrap.sh         Start the stack, then seed Postgres and the ClickHouse cube
+  scripts/seed_postgres.sh     Apply Alembic migrations and load db/seed.yaml
+  scripts/seed_clickhouse.sh   Load the cube from data/seed_fpa.py when it is empty
+  db/                          Postgres governance store: models, Alembic migrations, YAML seed
   app.py                       FastAPI service: POST /api/v1/query and the query page
   templates/index.html         Browser page: LLM switch, question, answer, DSL, SQL, cited rows
   requirements-api.txt         Dependencies for the web service and model providers
@@ -120,13 +128,45 @@ model configuration remains unchanged when none of these variables is set.
 
 `app.py` exposes the full flow over HTTP and serves a single page at `/`.
 
+Everything in Docker. The stack is four containers: `fpa-ch` (ClickHouse),
+`fpa-pg` (Postgres), `fpa-temporal` and `fpa-dev-1` (this service). `fpa-dev-1`
+waits for Postgres, runs `alembic upgrade head` and then serves the API:
+
+```bash
+make docker-local-run      # build, start, migrate, then follow the app log (Ctrl+C detaches)
+make docker-seed-db        # seed Postgres and the ClickHouse cube
+make docker-local-stop     # stop everything, keeping the data
+make docker-reinit         # drop the governance schema and the cube, then rebuild and seed
+make docker-local-logs     # follow the app log at any time
+make docker-shell          # shell inside fpa-dev-1
+make help                  # list every target
+```
+
+Schema changes (see `db/README.md` for the full workflow):
+
+```bash
+make docker-make-migrations -m "add plan comment"   # autogenerate from db/models.py
+make docker-migrate                                 # apply pending migrations
+make docker-migrate-down                            # roll back one (rev=006 targets a revision)
+make docker-migrate-status                          # current revision, pending changes, history
+```
+
+`make docker-local-run` prints the migration step before following the log, so
+the applied revision is visible on every start.
+
+Or run the service on the host against the containers:
+
 ```bash
 uv pip install --python .venv/bin/python -r requirements-api.txt
-docker start fpa-ch                       # ClickHouse, seeded with data/seed_fpa.py
+scripts/bootstrap.sh                      # ClickHouse + Postgres + Temporal, both seeded
 unset ANTHROPIC_API_KEY                   # only when using the Claude subscription
 .venv/bin/uvicorn app:app --reload --port 8000
 # open http://localhost:8000
 ```
+
+The Claude subscription provider needs the local `claude` login, so it is only
+available when running on the host; inside the container use `claude-api` or
+`gemini` by passing `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` through.
 
 Endpoints:
 
@@ -136,6 +176,19 @@ Endpoints:
   `data/out/cube_manifest.json`.
 - `GET /api/v1/providers` reports which providers are configured; the page
   greys out the others.
+
+Every request is logged by `fpa-dev-1`, so `make docker-local-run` and
+`make docker-local-logs` show which API was hit and what it returned:
+
+```text
+fpa.api query received | provider=claude-code companies=2 | 'SELECT services_revenue BY practice FOR PERIOD 2026-Q2'
+fpa.api POST /api/v1/query -> 200 106ms | provider=claude-code mode=direct_dsl status=SUCCESS rows=6 dsl='SELECT ...'
+fpa.api GET /api/v1/providers -> 200 0ms
+```
+
+Alongside these, the log carries uvicorn's access lines and the pipeline events
+from `fpa_project.agent_team` (`scope_injected`, `query_compiled`,
+`clickhouse_execution_completed`, `response_completed`).
 
 The response wraps the orchestrator's `AgentFPAResponse` unchanged:
 

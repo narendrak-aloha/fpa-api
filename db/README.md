@@ -17,6 +17,9 @@ Postgres schema `fpa_governance`.
 
 ## Layout
 
+Alembic and the seed loader run inside the `fpa-dev-1` container; the same
+commands work on the host against the published ports.
+
 ```text
 db/
   alembic.ini              Alembic config (URL, numbered file names)
@@ -34,22 +37,45 @@ db/
       005_create_plan_approval.py
       006_create_variance_reporting.py
       007_create_audit_and_disclosure_log.py
+      ...                    new migrations land here as 008_, 009_, ...
   001_schema.sql           Original raw SQL schema (reference)
   002_seed.sql             Original raw SQL seed (reference)
 ```
 
 ## Setup
 
+Everything in Docker, where Alembic and the seeders run inside `fpa-dev-1`:
+
 ```bash
-# Postgres from docker/docker-compose.yml is published on localhost:5431
-docker compose -f docker/docker-compose.yml up -d postgres
+make docker-local-run      # start the stack; the app container applies alembic upgrade head
+make docker-seed-db        # load db/seed.yaml and the ClickHouse cube
+make docker-reinit         # drop the governance schema and the cube, then rebuild and seed
+```
 
+Or from the host, against the same containers:
+
+```bash
 uv pip install --python .venv/bin/python -e ".[db]"   # alembic, sqlalchemy, psycopg, pyyaml
+scripts/bootstrap.sh                                  # docker compose up -d + both seeders
+```
 
-# run from the project root
+`scripts/bootstrap.sh` runs `docker compose up -d` and then the two seed
+scripts. To do it by hand, or to run only one of them:
+
+```bash
+docker compose -f docker/docker-compose.yml up -d postgres   # published on localhost:5431
+scripts/seed_postgres.sh          # alembic upgrade head + python -m db.seed
+scripts/seed_clickhouse.sh        # loads the cube only when it is empty
+RESEED_CUBE=1 scripts/seed_clickhouse.sh   # drop and rebuild the cube
+
+# or the underlying commands, from the project root
 .venv/bin/alembic -c db/alembic.ini upgrade head
 .venv/bin/python -m db.seed
 ```
+
+Both scripts wait for their container's healthcheck and can be re-run at any
+time: migrations skip steps already applied, the YAML load skips existing rows,
+and the cube is skipped when it already holds data.
 
 The connection defaults to `postgresql+psycopg://postgres:fpa@localhost:5431/fpa`
 (set in `alembic.ini`). Set `FPA_GOVERNANCE_DB_URL` to point both Alembic and
@@ -84,12 +110,22 @@ alembic -c db/alembic.ini check               # fail if models.py and the databa
 
 ### Adding a migration
 
-1. Change or add a model in `db/models.py`.
+1. Change or add a model in `db/models.py`. Every model needs a primary key.
 2. Generate the migration:
    ```bash
-   alembic -c db/alembic.ini revision --autogenerate -m "add plan comment"
+   make docker-make-migrations -m "add plan comment"   # in Docker (m="..." also works)
+   alembic -c db/alembic.ini revision --autogenerate -m "add plan comment"   # or on the host
    ```
-3. Review the generated file, then `alembic -c db/alembic.ini upgrade head`.
+3. Review the generated file, then apply it:
+   ```bash
+   make docker-migrate          # or: alembic -c db/alembic.ini upgrade head
+   make docker-migrate-status   # current revision, pending changes, history
+   make docker-migrate-down     # roll back one (rev=006 targets a revision)
+   ```
+
+`make docker-make-migrations` upgrades to head first, so autogenerate compares
+against an up-to-date database. Restarting the stack, or running
+`make docker-local-run`, applies anything pending.
 
 Revision ids are **sequential numbers, not random hashes**. `env.py` takes the
 highest numeric revision and adds one, so the next files are
