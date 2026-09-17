@@ -48,6 +48,8 @@ class FinOpsPlanner:
             plan = candidate if isinstance(candidate, AgentPlan) else AgentPlan.model_validate(candidate)
         except ValidationError as exc:
             return PlanningResponse(status="ERROR", errors=[ValidationIssue(code="INVALID_OUTPUT", message=str(exc))], masked_context=masked)
+        if plan.out_of_scope:
+            return PlanningResponse(status="VALID", plan=plan, masked_context=masked)
         # A typed model response is still untrusted until its DSL is validated.
         errors = validate_dsl(plan.dsl, self.registry)
         return PlanningResponse(status="VALID" if not errors else "ERROR", plan=plan if not errors else None, errors=errors, masked_context=masked)
@@ -84,26 +86,33 @@ class FPAOrchestrator:
         # Validate the candidate before allowing it to reach the scoped tool.
         result = self.planner.generate(request, candidate)
         dsl = result.plan.dsl if result.plan else ""
+        assumptions = result.plan.assumptions if result.plan else []
         if result.status != "VALID":
             log_event(self.logger, "dsl_validation_failed", run_id=run_id, status="VALIDATION_ERROR", code=result.errors[0].code if result.errors else "INVALID_OUTPUT")
             message = "; ".join(issue.message for issue in result.errors)
             return AgentFPAResponse(user_query=request.request, generated_dsl=dsl, execution_status="VALIDATION_ERROR", narrative_explanation=narrative, error_message=message)
+        if result.plan.out_of_scope:
+            # Nothing is compiled or executed, so the refusal cannot cite numbers either.
+            ok, _ = self.arithmetic_hook.verify(result.plan.explanation, [])
+            explanation = result.plan.explanation if ok else "This question cannot be answered from the FP&A cube."
+            log_event(self.logger, "request_out_of_scope", run_id=run_id, status="OUT_OF_SCOPE")
+            return AgentFPAResponse(user_query=prepared.request, execution_status="OUT_OF_SCOPE", narrative_explanation=explanation, assumptions=assumptions)
         # FPATools injects authenticated scope, compiles parameterized SQL and
         # masks result rows before they are returned to this orchestrator.
         query_result = self.tools.run_finops_query(dsl)
         log_event(self.logger, "scoped_query_completed", run_id=run_id, status=query_result.status, row_count=query_result.row_count)
         if query_result.status == "REJECTED_SCOPE":
-            return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="REJECTED_SCOPE", narrative_explanation=narrative, error_message=query_result.errors[0].message)
+            return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="REJECTED_SCOPE", narrative_explanation=narrative, assumptions=assumptions, error_message=query_result.errors[0].message)
         if query_result.status != "SUCCESS":
             message = "; ".join(error.message for error in query_result.errors)
-            return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="VALIDATION_ERROR", narrative_explanation=narrative, error_message=message)
+            return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="VALIDATION_ERROR", narrative_explanation=narrative, assumptions=assumptions, error_message=message)
         ok, error = self.arithmetic_hook.verify(narrative, query_result.rows)
         if not ok:
             log_event(self.logger, "arithmetic_verification_failed", run_id=run_id, status="VALIDATION_ERROR")
-            return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="VALIDATION_ERROR", error_message=error)
+            return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="VALIDATION_ERROR", assumptions=assumptions, error_message=error)
         log_event(self.logger, "arithmetic_verification_completed", run_id=run_id, status="SUCCESS")
         log_event(self.logger, "response_completed", run_id=run_id, status="SUCCESS", row_count=query_result.row_count)
-        return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="SUCCESS", narrative_explanation=narrative, cited_data_rows=query_result.rows)
+        return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="SUCCESS", narrative_explanation=narrative, assumptions=assumptions, cited_data_rows=query_result.rows)
 
     def finalize_with_retries(self, request: PlanningRequest, candidates: list[AgentPlan | dict], narrative: str | None = None) -> AgentFPAResponse:
         """Try at most five candidate plans, retrying only validation failures."""
@@ -160,14 +169,14 @@ class FPAOrchestrator:
                 narrative = content.narrative_explanation
             elif isinstance(content, AgentPlan):
                 candidate, narrative = content, content.explanation
-            elif isinstance(content, dict) and content.get("dsl"):
+            elif isinstance(content, dict) and (content.get("dsl") or content.get("out_of_scope")):
                 candidate, narrative = content, content.get("explanation") or content.get("narrative_explanation")
             else:
                 correction = "response did not contain a non-empty AgentPlan.dsl"
                 last_result = AgentFPAResponse(user_query=prepared.request, execution_status="VALIDATION_ERROR", error_message=correction)
                 continue
             result = self.finalize(request, candidate, narrative)
-            if result.execution_status in {"SUCCESS", "REJECTED_SCOPE"}:
+            if result.execution_status in {"SUCCESS", "REJECTED_SCOPE", "OUT_OF_SCOPE"}:
                 return result
             last_result = result
             correction = result.error_message or "DSL validation failed"

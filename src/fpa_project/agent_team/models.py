@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ValidationIssue(BaseModel):
@@ -29,9 +29,19 @@ class AgentPlan(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    dsl: str = Field(min_length=1, max_length=8_000)
+    dsl: str = Field(default="", max_length=8_000)
     explanation: str = Field(default="", max_length=2_000)
     assumptions: list[str] = Field(default_factory=list, max_length=20)
+    out_of_scope: bool = False
+
+    @model_validator(mode="after")
+    def _dsl_matches_scope(self) -> "AgentPlan":
+        # A refusal must not smuggle a query in; an answer must carry one.
+        if self.out_of_scope and self.dsl.strip():
+            raise ValueError("out_of_scope plans must not contain dsl")
+        if not self.out_of_scope and not self.dsl.strip():
+            raise ValueError("dsl is required unless out_of_scope is true")
+        return self
 
 
 class PlanningResponse(BaseModel):
@@ -62,8 +72,9 @@ class AgentFPAResponse(BaseModel):
 
     user_query: str
     generated_dsl: str = ""
-    execution_status: Literal["SUCCESS", "VALIDATION_ERROR", "REJECTED_SCOPE"]
+    execution_status: Literal["SUCCESS", "VALIDATION_ERROR", "REJECTED_SCOPE", "OUT_OF_SCOPE"]
     narrative_explanation: str | None = None
+    assumptions: list[str] = Field(default_factory=list)
     cited_data_rows: list[dict[str, Any]] = Field(default_factory=list)
     error_message: str | None = None
 

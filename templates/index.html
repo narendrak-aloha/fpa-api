@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FP&amp;A Query</title>
+<style>
+:root{--paper:#FCFBF8;--paper2:#F5F3ED;--paper3:#EFEDE5;--ink:#17171A;--ink2:#3D3D42;--muted:#6E6E75;--rule:#E4E1D8;--accent:#2B4C7E;--ok:#2F6B4F;--warn:#9A3B26;
+--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--paper);color:var(--ink2);font-family:var(--sans);line-height:1.6}
+.wrap{max-width:1000px;margin:0 auto;padding:32px 16px 80px}
+h1{font-size:1.8rem;color:var(--ink);font-weight:500}
+.sub{color:var(--muted);margin-bottom:24px}
+.card{border:1px solid var(--rule);background:#fff;margin-bottom:16px}
+.hd{padding:8px 14px;background:var(--paper3);border-bottom:1px solid var(--rule);font:500 11px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);display:flex;justify-content:space-between;align-items:center}
+.bd{padding:14px}
+textarea,input{width:100%;padding:10px;border:1px solid var(--rule);font:14px var(--sans);background:var(--paper)}
+textarea:focus,input:focus{outline:2px solid rgba(43,76,126,.25);border-color:var(--accent)}
+.row{display:flex;gap:10px;margin-top:10px;flex-wrap:wrap}
+.row input{flex:1;min-width:200px}
+.seg{display:inline-flex;border:1px solid var(--rule)}
+.seg label{padding:9px 14px;cursor:pointer;font-size:14px;background:var(--paper2);color:var(--muted)}
+.seg input{display:none}
+.seg label:has(input:checked){background:var(--accent);color:#fff}
+.seg label.off{opacity:.55}
+button{padding:10px 18px;border:1px solid var(--accent);background:var(--accent);color:#fff;font:500 14px var(--sans);cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.chip{background:var(--paper2);color:var(--accent);border:1px solid var(--rule);font-size:12.5px;padding:4px 10px}
+pre{font:12.5px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;background:var(--paper2);padding:12px;color:var(--ink)}
+.status{font:600 11px var(--mono);padding:2px 8px}
+.SUCCESS{background:rgba(47,107,79,.12);color:var(--ok)}
+.fail{background:rgba(154,59,38,.1);color:var(--warn)}
+.err{color:var(--warn)}
+.tw{overflow-x:auto;max-height:480px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{position:sticky;top:0;background:var(--paper3);text-align:left;padding:8px 10px;font:500 11px var(--mono);color:var(--accent);border-bottom:1px solid var(--rule);white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid var(--rule);white-space:nowrap}
+td.n{font-family:var(--mono);text-align:right}
+.hidden{display:none}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid var(--rule);border-top-color:var(--accent);border-radius:50%;animation:s .8s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>FP&amp;A Query</h1>
+  <p class="sub">Ask a question in plain English. An Agno team translates it to FinOpsExpr using its tools; the orchestrator validates, compiles to SQL, runs it against ClickHouse and checks every number in the answer against the cited rows.</p>
+
+  <div class="card">
+    <div class="hd">Question</div>
+    <div class="bd">
+      <textarea id="q" rows="3" placeholder="e.g. What was services revenue by practice in Q2 2026?"></textarea>
+      <div class="row">
+        <div class="seg" id="providers">
+          <label data-p="claude-code" title="Claude Agent SDK, uses your Claude Code login"><input type="radio" name="provider" value="claude-code" checked>Claude (subscription)</label>
+          <label data-p="claude-api" title="Anthropic API, needs ANTHROPIC_API_KEY"><input type="radio" name="provider" value="claude-api">Claude API key</label>
+          <label data-p="gemini"><input type="radio" name="provider" value="gemini">Gemini (Agno)</label>
+        </div>
+        <input id="companies" placeholder="Company scope, comma-separated (blank = all)">
+        <button id="go">Ask</button>
+      </div>
+      <div class="chips" id="chips"></div>
+    </div>
+  </div>
+
+  <div id="loading" class="hidden"><span class="spin"></span>Agno team is working (leader → members → tools → compiler → ClickHouse). This can take 30–60s…</div>
+
+  <div id="out" class="hidden">
+    <div class="card">
+      <div class="hd">Answer <span id="status" class="status"></span></div>
+      <div class="bd"><p id="narrative"></p><div id="assumptionsBox" class="hidden" style="margin-top:10px"><div style="font:500 11px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">Assumptions</div><ul id="assumptions" style="margin:4px 0 0 18px"></ul></div><p id="error" class="err"></p></div>
+    </div>
+    <div class="card" id="dslCard"><div class="hd">Generated DSL</div><div class="bd"><pre id="dsl"></pre></div></div>
+    <div class="card" id="sqlCard"><div class="hd">Compiled SQL</div><div class="bd"><pre id="sql"></pre><pre id="params" style="margin-top:8px"></pre></div></div>
+    <details class="card"><summary class="hd" style="cursor:pointer">AgentFPAResponse (raw)</summary><div class="bd"><pre id="raw"></pre></div></details>
+    <div class="card" id="rowsCard"><div class="hd">Results <span id="count"></span></div><div class="tw"><table id="tbl"></table></div></div>
+  </div>
+</div>
+
+<script>
+const examples = [
+  "What was services revenue by practice in Q2 2026?",
+  "Show gross margin % by geo region for 2026-Q2",
+  "Delivery cost by country for Q2 2026",
+  "Compare base plan vs actual services revenue by company for 2026-Q2",
+  "SELECT services_revenue BY company FOR PERIOD 2026-Q2",
+];
+const $ = id => document.getElementById(id);
+
+try { const saved = localStorage.getItem("fpa-provider"); const el = saved && document.querySelector(`input[value="${saved}"]`); if (el) el.checked = true; } catch {}
+document.querySelectorAll('input[name="provider"]').forEach(r => r.onchange = () => { try { localStorage.setItem("fpa-provider", r.value); } catch {} });
+fetch("/api/v1/providers").then(r => r.json()).then(list => list.forEach(p => {
+  const l = document.querySelector(`label[data-p="${p.id}"]`);
+  if (l && !p.configured) { l.classList.add("off"); l.title = "API key not set on the server"; }
+})).catch(() => {});
+
+examples.forEach(e => {
+  const b = document.createElement("button");
+  b.className = "chip"; b.textContent = e;
+  b.onclick = () => { $("q").value = e; ask(); };
+  $("chips").appendChild(b);
+});
+
+$("go").onclick = ask;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask(); });
+
+async function ask() {
+  const query = $("q").value.trim();
+  if (!query) return;
+  const companies = $("companies").value.split(",").map(s => s.trim()).filter(Boolean);
+  $("go").disabled = true;
+  $("loading").classList.remove("hidden");
+  $("out").classList.add("hidden");
+  try {
+    const res = await fetch("/api/v1/query", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({query, provider: document.querySelector('input[name="provider"]:checked').value, companies: companies.length ? companies : null}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data.detail || data));
+    render(data);
+  } catch (err) {
+    render({agent_response: {execution_status: "REQUEST_ERROR", error_message: err.message, cited_data_rows: []}});
+  } finally {
+    $("go").disabled = false;
+    $("loading").classList.add("hidden");
+  }
+}
+
+function render(d) {
+  const a = d.agent_response || {execution_status: d.status || "REQUEST_ERROR", error_message: d.error, cited_data_rows: []};
+  const rows = a.cited_data_rows || [];
+  const cols = d.columns && d.columns.length ? d.columns : (rows[0] ? Object.keys(rows[0]) : []);
+  const via = d.mode === "agno_team" ? `Agno team · ${d.provider}` : d.mode === "direct_dsl" ? "direct DSL" : d.provider;
+  $("out").classList.remove("hidden");
+  $("status").textContent = [a.execution_status, via, d.duration_ms ? (d.duration_ms / 1000).toFixed(1) + "s" : ""].filter(Boolean).join(" · ");
+  $("status").className = "status " + (a.execution_status === "SUCCESS" ? "SUCCESS" : a.execution_status === "OUT_OF_SCOPE" ? "" : "fail");
+  $("narrative").textContent = a.narrative_explanation || (a.execution_status === "SUCCESS" ? `Returned ${rows.length} row(s).` : "");
+  $("error").textContent = a.error_message || "";
+  const list = $("assumptions");
+  list.replaceChildren(...(a.assumptions || []).map(t => { const li = document.createElement("li"); li.textContent = t; return li; }));
+  $("assumptionsBox").classList.toggle("hidden", !(a.assumptions || []).length);
+  $("dsl").textContent = a.generated_dsl || "";
+  $("dslCard").classList.toggle("hidden", !a.generated_dsl);
+  $("sql").textContent = d.sql || "";
+  $("params").textContent = d.params && Object.keys(d.params).length ? "params: " + JSON.stringify(d.params) : "";
+  $("sqlCard").classList.toggle("hidden", !d.sql);
+  $("count").textContent = rows.length ? `${rows.length} cited rows` : "";
+  $("rowsCard").classList.toggle("hidden", !rows.length);
+  $("raw").textContent = JSON.stringify(a, null, 2);
+
+  const tbl = $("tbl");
+  tbl.replaceChildren();
+  if (!rows.length) return;
+  const head = tbl.createTHead().insertRow();
+  cols.forEach(c => { const th = document.createElement("th"); th.textContent = c; head.appendChild(th); });
+  const body = tbl.createTBody();
+  rows.forEach(r => {
+    const tr = body.insertRow();
+    cols.forEach(c => {
+      const td = tr.insertCell(), v = r[c];
+      if (typeof v === "number") { td.className = "n"; td.textContent = v.toLocaleString(undefined, {maximumFractionDigits: 4}); }
+      else td.textContent = v ?? "";
+    });
+  });
+}
+</script>
+</body>
+</html>
