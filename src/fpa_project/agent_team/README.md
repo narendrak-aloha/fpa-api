@@ -14,6 +14,15 @@ code, or commits model changes.
   time-function offsets against `data/schema_snapshot.json`.
 - Invalid syntax or registry references return structured `ValidationIssue`
   objects and no plan.
+- `AgentPlan` either carries `dsl`, or sets `out_of_scope=true` with an empty
+  `dsl` for questions the cube cannot answer. A plan with neither, or a refusal
+  that still carries DSL, is rejected. Out-of-scope plans return
+  `OUT_OF_SCOPE` and are never compiled or executed; a refusal that contains a
+  number is replaced with a fixed message.
+- The plan's `assumptions` are carried into `AgentFPAResponse.assumptions`.
+- `ArithmeticVerificationPostHook` rejects any number in the narrative that is
+  not present in the returned rows, and the orchestrator retries the team at
+  most five times.
 - The Agno adapter is optional and exposes no database, filesystem, SQL, or code
   execution tools. Human approval is required outside this module for any
   future model change; `ModelChangeProposal` is always `DRAFT` and the module
@@ -73,3 +82,58 @@ validation → scoped parameterized SQL compilation → ClickHouse execution →
 masked result rows. The module does not create the ClickHouse connection. A
 real database test requires reachable ClickHouse credentials and the optional
 `clickhouse` dependency; the repository tests use an injected fake executor.
+
+## Natural-language execution with the team
+
+`run_with_team` sends the masked request to an Agno team, takes the returned
+`AgentPlan` and passes it through `finalize`. Build the team with the scoped
+toolset so members can list metrics and dimensions and run queries through the
+compiler:
+
+```python
+from fpa_project.agent_team import build_agno_team
+from fpa_project.agent_team.claude_code_model import ClaudeCodeModel
+
+team = build_agno_team(model=ClaudeCodeModel(), toolset=tools)
+response = FPAOrchestrator(tools).run_with_team(
+    team, PlanningRequest(request="What was services revenue by practice in Q2 2026?"),
+)
+```
+
+`build_agno_team` creates a `coordinate`-mode team with `QueryAgent`,
+`VarianceAgent` and `PlanningAgent`. Their shared instructions contain the
+FinOpsExpr grammar guide (`FINOPSEXPR_GUIDE` in `team.py`), the rule that every
+number in the explanation must come from `run_finops_query` rows, and the
+out-of-scope rule. Build the team per request when scope differs between
+callers, because the toolset holds the `UserScope`.
+
+`AgentFPAResponse.execution_status` is one of `SUCCESS`, `VALIDATION_ERROR`,
+`REJECTED_SCOPE` or `OUT_OF_SCOPE`.
+
+## Claude subscription model (`ClaudeCodeModel`)
+
+`claude_code_model.py` provides an Agno `Model` backed by the Claude Agent SDK.
+It authenticates with the local Claude Code login (`claude`, Pro/Max
+subscription) instead of an API key, so the same Agno team can run on a
+subscription during local development.
+
+Agno still owns the loop: leader, member delegation, tool execution and
+`output_schema` parsing. Each `invoke` renders Agno's messages and tool schemas
+into a prompt and makes one SDK call with:
+
+- `tools=[]`, so Claude Code's built-in tools (shell, files, web) are disabled;
+- `setting_sources=[]`, so local Claude Code settings are not loaded;
+- a JSON-schema `output_format` whose result is either
+  `{"action": "call_tools", "tool_calls": [...]}`, which is converted to Agno
+  tool calls that Agno executes, or `{"action": "respond", "content": "..."}`,
+  which Agno parses into `AgentPlan`.
+
+SDK failures are raised as Agno `ModelProviderError`. Set
+`FPA_CLAUDE_CODE_MODEL` to choose a model; otherwise the Claude Code default is
+used. If `ANTHROPIC_API_KEY` is present in the environment the CLI uses it
+instead of the subscription.
+
+Limitations: each call starts a Claude Code process (a few seconds), tool
+calling is carried through structured output rather than native tool use, the
+full transcript is resent on every call, and there is no streaming. Use
+`agno.models.anthropic.Claude` with an API key for shared deployments.

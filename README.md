@@ -9,9 +9,14 @@ static schema snapshot derived from `seed_fpa.py`, and emits parameterised SQL.
 
 ```text
 fpa-project/
-  data/schema_snapshot.json   Static contract derived from seed_fpa.py
+  app.py                       FastAPI service: POST /api/v1/query and the query page
+  templates/index.html         Browser page: LLM switch, question, answer, DSL, SQL, cited rows
+  requirements-api.txt         Dependencies for the web service and model providers
+  data/schema_snapshot.json    Static contract derived from seed_fpa.py
+  data/out/cube_manifest.json  Seed manifest; app.py reads the company list from it
   src/fpa_project/dsl/         Lexer, AST, parser, schema and compiler
-  src/fpa_project/agent_team/  Safe NL-to-FinOpsExpr Agno boundary
+  src/fpa_project/agent_team/  Safe NL-to-FinOpsExpr Agno boundary (team, tools, orchestrator,
+                               ClaudeCodeModel for the Claude subscription)
   tests/                       Positive and negative parser/compiler tests
   pyproject.toml               Package metadata and pytest dependency
 ```
@@ -22,10 +27,13 @@ The project is a dependency-light library with a strict boundary between
 planning, compilation, and execution:
 
 ```text
+Browser page -> POST /api/v1/query (app.py)
+          |
+          v
 PlanningRequest + UserScope
           |
           v
-agent_team.masking -> optional Agno team -> AgentPlan
+agent_team.masking -> Agno team (Claude subscription / Claude API / Gemini) -> AgentPlan
                                       |
                                       v
                          parser -> typed AST
@@ -61,7 +69,9 @@ hooks provide allow-listed operational logs and redacted external audit data.
 
 No module in this package creates a ClickHouse connection, executes writes, or
 mutates the schema. Applications own authentication, connection lifecycle,
-and any human approval workflow for draft model changes.
+and any human approval workflow for draft model changes. In this repository
+that application is `app.py`: it creates the `clickhouse-connect` client and
+the caller's `UserScope`, and hands both to the package.
 
 ### Source of truth and change boundaries
 
@@ -71,8 +81,9 @@ When a metric, dimension, scenario, or table grain changes, update the seed,
 snapshot, and tests together. The compiler should not infer schema changes from
 live database metadata because that would make query behavior change silently.
 
-Runtime code uses only the Python standard library. Install the test dependency
+The DSL compiler uses only the Python standard library. Install the test dependency
 with `python -m pip install -e ".[dev]"`; run tests with `python -m pytest`.
+The web service and model providers need the packages in `requirements-api.txt`.
 The compiler does not open a database connection. `clickhouse-connect` can be
 added by an application that wants to execute the returned SQL and parameters.
 
@@ -89,12 +100,97 @@ validated against the planning registry; personal employee data is masked before
 model context is prepared. The team cannot generate SQL or execute writes. See
 `src/fpa_project/agent_team/README.md`.
 
+The team's instructions include a FinOpsExpr grammar guide with examples, so
+members write FinOpsExpr rather than SQL-like forms such as
+`SELECT SUM(services_revenue)`. Members get the four tools `list_metrics`,
+`list_dimensions`, `run_finops_query` and `propose_driver`; there is no SQL
+tool. The team returns an `AgentPlan` with `dsl`, `explanation` and
+`assumptions`. When a question cannot be answered from the cube (for example a
+cricket score), the plan sets `out_of_scope=true` with an empty `dsl`, and the
+orchestrator returns `OUT_OF_SCOPE` without compiling or querying ClickHouse.
+
 When the optional team is used, API keys rotate round-robin per model
 invocation. Store a comma- or newline-separated set in the environment, for
 example `LLM_API_KEYS=key-one,key-two,key-three`. Provider-specific list
 variables (`OPENAI_API_KEYS`, `ANTHROPIC_API_KEYS`, `GOOGLE_API_KEYS`, or
 `GEMINI_API_KEYS`) and their singular equivalents are also supported. Existing
 model configuration remains unchanged when none of these variables is set.
+
+## Web API and query page
+
+`app.py` exposes the full flow over HTTP and serves a single page at `/`.
+
+```bash
+uv pip install --python .venv/bin/python -r requirements-api.txt
+docker start fpa-ch                       # ClickHouse, seeded with data/seed_fpa.py
+unset ANTHROPIC_API_KEY                   # only when using the Claude subscription
+.venv/bin/uvicorn app:app --reload --port 8000
+# open http://localhost:8000
+```
+
+Endpoints:
+
+- `POST /api/v1/query` with `{"query", "provider", "companies", "max_rows"}`.
+  `provider` is `claude-code` (default), `claude-api` or `gemini`;
+  `companies` is a list of company codes and defaults to every company in
+  `data/out/cube_manifest.json`.
+- `GET /api/v1/providers` reports which providers are configured; the page
+  greys out the others.
+
+The response wraps the orchestrator's `AgentFPAResponse` unchanged:
+
+```json
+{
+  "agent_response": {
+    "user_query": "What was services revenue by practice in Q2 2026?",
+    "generated_dsl": "SELECT services_revenue BY practice FOR PERIOD 2026-Q2",
+    "execution_status": "SUCCESS",
+    "narrative_explanation": "Services revenue by practice ...",
+    "assumptions": ["..."],
+    "cited_data_rows": [{"practice": "Data Platform", "services_revenue": 105113743.51}],
+    "error_message": null
+  },
+  "provider": "claude-code",
+  "mode": "agno_team",
+  "sql": "SELECT practice, sumIf(...) ... GROUP BY practice",
+  "params": {"p0": "2026-04-01", "p1": "2026-07-01"},
+  "columns": ["practice", "services_revenue"],
+  "duration_ms": 35200
+}
+```
+
+`execution_status` is `SUCCESS`, `VALIDATION_ERROR`, `REJECTED_SCOPE` or
+`OUT_OF_SCOPE`. `mode` is `agno_team` for natural-language questions,
+`direct_dsl` when the question already starts with `SELECT` (the model is
+skipped but validation, scope, compilation and execution are unchanged), and
+`not_run` for configuration or connection errors. `sql` and `params` are
+recompiled from the generated DSL for display; the executed query is the one
+recorded in `logs/fpa_external_audit.jsonl`.
+
+The team is built per request with `build_agno_team(model=..., toolset=FPATools(scope, ...))`,
+so every member's tools carry the caller's scope. Scope comes from the request,
+never from model output or DSL text.
+
+### Model providers and authentication
+
+| Provider | Agno model | Authentication | Optional model setting |
+|---|---|---|---|
+| `claude-code` | `ClaudeCodeModel` (Claude Agent SDK) | Local Claude Code login (`claude`, Pro/Max subscription) | `FPA_CLAUDE_CODE_MODEL` |
+| `claude-api` | `agno.models.anthropic.Claude` | `ANTHROPIC_API_KEY` | `FPA_CLAUDE_MODEL` |
+| `gemini` | `agno.models.google.Gemini` | `GOOGLE_API_KEY` | `FPA_MODEL_ID` |
+
+For `claude-code`, install Claude Code and run `claude` once to log in. No API
+key appears in the code. If `ANTHROPIC_API_KEY` is set in the server's
+environment the Claude Code CLI uses it instead of the subscription. The
+subscription path suits local development and demos; a shared deployment
+should use `claude-api`. ClickHouse connection settings come from
+`CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `CLICKHOUSE_USER` and
+`CLICKHOUSE_PASSWORD` (defaults `localhost`, `8123`, `default`, `fpa`).
+
+A natural-language question typically takes 30-60 seconds with `claude-code`:
+the leader and each member step start a separate Claude Code process, and a
+failed validation or arithmetic check triggers another team attempt (at most
+five).
 
 ## Schema source
 
