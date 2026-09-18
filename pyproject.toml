@@ -29,6 +29,8 @@ dependencies = [
     "anthropic>=0.40",        # provider: claude-api
     "claude-agent-sdk>=0.2",  # provider: claude-code (also needs the local `claude` CLI)
     "packaging>=23.0",
+    "python-json-logger>=4.2.0",
+    "python-dotenv>=1.2.3",
 ]
 
 [project.optional-dependencies]

@@ -2,13 +2,13 @@
 # Load the ClickHouse cube from data/seed_fpa.py, only when it is empty.
 #   scripts/seed_clickhouse.sh          seed if empty
 #   RESEED_CUBE=1 scripts/seed_clickhouse.sh   drop and rebuild
-# Env: CH_HOST, CH_PORT, CH_USER, CH_PASSWORD.
+# Env: CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-HOST="${CH_HOST:-localhost}"; PORT="${CH_PORT:-8123}"
-USER="${CH_USER:-default}"; PASSWORD="${CH_PASSWORD:-fpa}"
-PY="${PYTHON:-$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)}"
+HOST="${CLICKHOUSE_HOST:-localhost}"; PORT="${CLICKHOUSE_PORT:-8123}"
+USER="${CLICKHOUSE_USER:-default}"; PASSWORD="${CLICKHOUSE_PASSWORD:-fpa}"
+PY="${PYTHON:-python3}"
 query() { curl -sS --fail-with-body -u "${USER}:${PASSWORD}" "http://${HOST}:${PORT}/" --data-binary "$1"; }
 
 echo "==> waiting for ClickHouse on ${HOST}:${PORT}"

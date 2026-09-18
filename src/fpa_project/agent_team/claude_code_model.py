@@ -21,6 +21,7 @@ from agno.exceptions import ModelProviderError
 from agno.models.base import Model
 from agno.models.message import Message
 from agno.models.response import ModelResponse
+from fpa_project.config import claude_code_model
 
 _TURN_SCHEMA = {
     "type": "object",
@@ -108,7 +109,7 @@ class ClaudeCodeModel(Model):
 
         options = ClaudeAgentOptions(
             system_prompt=system,
-            model=self.claude_model or os.getenv("FPA_CLAUDE_CODE_MODEL") or None,
+            model=self.claude_model or claude_code_model(),
             tools=[],
             allowed_tools=[],
             setting_sources=[],

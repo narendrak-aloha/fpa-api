@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+
+from fpa_project.config import external_audit_log
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -45,7 +47,7 @@ class ExternalAuditLogger:
     """Append redacted request/response envelopes for external-system calls."""
 
     def __init__(self, path: str | os.PathLike[str] | None = None):
-        configured = path or os.getenv("FPA_EXTERNAL_AUDIT_LOG", "logs/fpa_external_audit.jsonl")
+        configured = path or external_audit_log()
         self.path = Path(configured)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 

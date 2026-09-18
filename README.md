@@ -11,8 +11,8 @@ static schema snapshot derived from `seed_fpa.py`, and emits parameterised SQL.
 fpa-project/
   Makefile                     docker-local-run / -stop / -logs, docker-seed-db, docker-reinit,
                                docker-make-migrations, docker-migrate*, docker-shell (make help)
-  docker/docker-compose.yml    ClickHouse, Postgres, Temporal and the fpa-dev-1 app container
-  docker/Dockerfile            Image for fpa-dev-1: API, Alembic migrations and both seeders
+  docker/docker-compose.yml    ClickHouse, Postgres, Temporal and the fpa_app-1 app container
+  docker/Dockerfile            Image for fpa_app-1: API, Alembic migrations and both seeders
   scripts/bootstrap.sh         Start the stack, then seed Postgres and the ClickHouse cube
   scripts/seed_postgres.sh     Apply Alembic migrations and load db/seed.yaml
   scripts/seed_clickhouse.sh   Load the cube from data/seed_fpa.py when it is empty
@@ -128,8 +128,8 @@ model configuration remains unchanged when none of these variables is set.
 
 `app.py` exposes the full flow over HTTP and serves a single page at `/`.
 
-Everything in Docker. The stack is four containers: `fpa-ch` (ClickHouse),
-`fpa-pg` (Postgres), `fpa-temporal` and `fpa-dev-1` (this service). `fpa-dev-1`
+Everything in Docker. The stack is four containers: `fpa_clickhouse-1` (ClickHouse),
+`fpa_postgres-1` (Postgres), `fpa_temporal-1` and `fpa_app-1` (this service). `fpa_app-1`
 waits for Postgres, runs `alembic upgrade head` and then serves the API:
 
 ```bash
@@ -138,7 +138,7 @@ make docker-seed-db        # seed Postgres and the ClickHouse cube
 make docker-local-stop     # stop everything, keeping the data
 make docker-reinit         # drop the governance schema and the cube, then rebuild and seed
 make docker-local-logs     # follow the app log at any time
-make docker-shell          # shell inside fpa-dev-1
+make docker-shell          # shell inside fpa_app-1
 make help                  # list every target
 ```
 
@@ -177,7 +177,7 @@ Endpoints:
 - `GET /api/v1/providers` reports which providers are configured; the page
   greys out the others.
 
-Every request is logged by `fpa-dev-1`, so `make docker-local-run` and
+Every request is logged by `fpa_app-1`, so `make docker-local-run` and
 `make docker-local-logs` show which API was hit and what it returned:
 
 ```text
@@ -239,6 +239,23 @@ subscription path suits local development and demos; a shared deployment
 should use `claude-api`. ClickHouse connection settings come from
 `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `CLICKHOUSE_USER` and
 `CLICKHOUSE_PASSWORD` (defaults `localhost`, `8123`, `default`, `fpa`).
+
+## Configuration
+
+`.env` holds API keys only. `make env` copies `.env.example` to `.env`; both keys
+are optional, since the `claude-code` provider uses the host's `claude` login.
+Everything else about the stack — ports, container names, hostnames, passwords — is
+written in `docker/docker-compose.yml`, so there is one place to read how it is wired.
+
+`make env-check` prints the values compose resolves for the app container.
+`src/fpa_project/config.py` is where the application reads them, and python-dotenv
+loads `.env` there too, so running on the host picks up the same keys.
+
+A few settings read from the shell for a one-off run and otherwise use their default:
+
+```bash
+LOG_LEVEL=DEBUG make docker-local-run     # also LOG_LEVEL_UVICORN, LOG_HANDLER, FPA_SKIP_SEED
+```
 
 A natural-language question typically takes 30-60 seconds with `claude-code`:
 the leader and each member step start a separate Claude Code process, and a

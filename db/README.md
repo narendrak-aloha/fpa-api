@@ -17,7 +17,7 @@ Postgres schema `fpa_governance`.
 
 ## Layout
 
-Alembic and the seed loader run inside the `fpa-dev-1` container; the same
+Alembic and the seed loader run inside the `fpa_app-1` container; the same
 commands work on the host against the published ports.
 
 ```text
@@ -44,7 +44,7 @@ db/
 
 ## Setup
 
-Everything in Docker, where Alembic and the seeders run inside `fpa-dev-1`:
+Everything in Docker, where Alembic and the seeders run inside `fpa_app-1`:
 
 ```bash
 make docker-local-run      # start the stack; the app container applies alembic upgrade head

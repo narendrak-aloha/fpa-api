@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Apply governance migrations and load db/seed.yaml. Safe to re-run.
 #   scripts/seed_postgres.sh
-# Env: PGHOST_PORT (default 5431), FPA_GOVERNANCE_DB_URL to target another database.
+# FPA_GOVERNANCE_DB_URL overrides the target; otherwise db/config.py resolves it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-PORT="${PGHOST_PORT:-5431}"
-PY="${PYTHON:-$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)}"
-export FPA_GOVERNANCE_DB_URL="${FPA_GOVERNANCE_DB_URL:-postgresql+psycopg://postgres:fpa@localhost:${PORT}/fpa}"
+PY="${PYTHON:-python3}"
+export FPA_GOVERNANCE_DB_URL="${FPA_GOVERNANCE_DB_URL:-$("$PY" -c 'from db.config import database_url; print(database_url())')}"
 
 echo "==> waiting for Postgres at ${FPA_GOVERNANCE_DB_URL##*@}"
 for _ in $(seq 1 60); do

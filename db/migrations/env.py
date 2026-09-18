@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from logging.config import fileConfig
 
@@ -10,14 +9,14 @@ from alembic import context
 from alembic.script import ScriptDirectory
 from sqlalchemy import engine_from_config, pool, text
 
+from db.config import database_url
 from db.models import SCHEMA, Base
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-if os.getenv("FPA_GOVERNANCE_DB_URL"):
-    config.set_main_option("sqlalchemy.url", os.environ["FPA_GOVERNANCE_DB_URL"])
+config.set_main_option("sqlalchemy.url", database_url())
 
 target_metadata = Base.metadata
 

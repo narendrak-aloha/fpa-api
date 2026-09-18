@@ -32,10 +32,14 @@ from fpa_project.agent_team import (  # noqa: E402
     build_agno_team, clickhouse_executor,
 )
 from fpa_project.dsl import DSLValidationError, ParseError, SecurityContext, compile_query  # noqa: E402
+from fpa_project.config import (  # noqa: E402
+    claude_api_model, clickhouse as clickhouse_settings, gemini_model,
+)
+from fpa_project.log_config import configure as configure_logging  # noqa: E402
 
 app = FastAPI(title="FPA Query API", version="1.0.0")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+configure_logging()
 log = logging.getLogger("fpa.api")
 
 
@@ -67,11 +71,9 @@ def get_client():
     global _client
     if _client is None:
         import clickhouse_connect
+        ch = clickhouse_settings()
         _client = clickhouse_connect.get_client(
-            host=os.getenv("CLICKHOUSE_HOST", "localhost"),
-            port=int(os.getenv("CLICKHOUSE_PORT", "8123")),
-            username=os.getenv("CLICKHOUSE_USER", "default"),
-            password=os.getenv("CLICKHOUSE_PASSWORD", "fpa"),
+            host=ch.host, port=ch.port, username=ch.user, password=ch.password,
         )
     return _client
 
@@ -88,9 +90,9 @@ def build_model(provider: str):
         return ClaudeCodeModel()
     if provider == "claude-api":
         from agno.models.anthropic import Claude
-        return Claude(id=os.getenv("FPA_CLAUDE_MODEL", "claude-sonnet-5"))
+        return Claude(id=claude_api_model())
     from agno.models.google import Gemini
-    return Gemini(id=os.getenv("FPA_MODEL_ID", "gemini-2.5-flash"))
+    return Gemini(id=gemini_model())
 
 
 class QueryRequest(BaseModel):

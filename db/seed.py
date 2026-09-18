@@ -10,10 +10,8 @@ Usage:  python -m db.seed [--file db/seed.yaml]   (run `alembic -c db/alembic.in
 from __future__ import annotations
 
 import argparse
-import configparser
 import hashlib
 import json
-import os
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -23,6 +21,7 @@ from sqlalchemy import Numeric, create_engine, literal_column, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Connection
 
+from db.config import database_url
 from db.models import (
     SCHEMA,
     AppUser, AuditEvent, DimAccount, DimCompany, DimCostCenter, LedgerVintage, PlanDriver, PlanFxRate,
@@ -37,14 +36,6 @@ TABLES = [
     PlanningModel, PlanningDimension, PlanningMeasure, PlanDriver, PlanStateTransition,
     PlanVersion, ScenarioSet, PlanFxRate, AuditEvent,
 ]
-
-
-def database_url() -> str:
-    if os.getenv("FPA_GOVERNANCE_DB_URL"):
-        return os.environ["FPA_GOVERNANCE_DB_URL"]
-    parser = configparser.ConfigParser(interpolation=None)
-    parser.read(DB_DIR / "alembic.ini")
-    return parser["alembic"]["sqlalchemy.url"]
 
 
 def event_hash(row: dict[str, Any]) -> str:
