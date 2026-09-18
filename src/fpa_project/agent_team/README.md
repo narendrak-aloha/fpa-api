@@ -49,9 +49,9 @@ response = planner.generate(request, {
 })
 ```
 
-Install the optional Agno integration with the project-specific dependency
-extra when deploying the model-backed team. The core validation layer remains
-usable in tests and offline workers without Agno.
+Agno and the provider SDKs are regular project dependencies (`uv sync --frozen`).
+The core validation layer does not call them, so it also works in tests and
+offline workers.
 
 ## Manual end-to-end execution
 
@@ -80,8 +80,9 @@ print(response.model_dump_json(indent=2))
 The flow is NL/request boundary → masked context → DSL parse and registry
 validation → scoped parameterized SQL compilation → ClickHouse execution →
 masked result rows. The module does not create the ClickHouse connection. A
-real database test requires reachable ClickHouse credentials and the optional
-`clickhouse` dependency; the repository tests use an injected fake executor.
+real database test requires reachable ClickHouse credentials
+(`clickhouse-connect` is installed with the project); the repository tests use
+an injected fake executor.
 
 ## Natural-language execution with the team
 

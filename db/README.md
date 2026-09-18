@@ -47,16 +47,16 @@ db/
 Everything in Docker, where Alembic and the seeders run inside `fpa_app-1`:
 
 ```bash
-make docker-local-run      # start the stack; the app container applies alembic upgrade head
-make docker-seed-db        # load db/seed.yaml and the ClickHouse cube
+make docker-local-run      # start the stack; the app container migrates and seeds both stores
+make docker-seed-db        # re-run both seeders by hand
 make docker-reinit         # drop the governance schema and the cube, then rebuild and seed
 ```
 
 Or from the host, against the same containers:
 
 ```bash
-uv pip install --python .venv/bin/python -e ".[db]"   # alembic, sqlalchemy, psycopg, pyyaml
-scripts/bootstrap.sh                                  # docker compose up -d + both seeders
+uv sync --frozen --extra dev     # every dependency, from uv.lock
+scripts/bootstrap.sh             # docker compose up -d + both seeders
 ```
 
 `scripts/bootstrap.sh` runs `docker compose up -d` and then the two seed
@@ -73,8 +73,8 @@ RESEED_CUBE=1 scripts/seed_clickhouse.sh   # drop and rebuild the cube
 .venv/bin/python -m db.seed
 ```
 
-Both scripts wait for their container's healthcheck and can be re-run at any
-time: migrations skip steps already applied, the YAML load skips existing rows,
+Both scripts wait until their database accepts connections and can be re-run
+at any time: migrations skip steps already applied, the YAML load skips existing rows,
 and the cube is skipped when it already holds data.
 
 The connection defaults to `postgresql+psycopg://postgres:fpa@localhost:5431/fpa`

@@ -4,7 +4,6 @@ ENV_FILE := .env
 COMPOSE  := docker compose --env-file $(ENV_FILE) -f docker/docker-compose.yml
 APP     := fpa-dev
 SCHEMA  := fpa_governance
-CUBE    := fpa_cube
 
 .PHONY: help env env-check docker-local-run docker-local-run-d docker-local-stop docker-local-logs docker-seed-db docker-reinit docker-shell \
         docker-make-migrations docker-migrate docker-migrate-down docker-migrate-status
@@ -72,9 +71,10 @@ docker-seed-db: $(ENV_FILE) ## Re-run both seeders by hand (the app already seed
 	$(COMPOSE) exec $(APP) python -m db.seed
 	$(COMPOSE) exec $(APP) scripts/seed_clickhouse.sh
 
+# psql takes host, user, password and database from the container's PG* variables.
+# RESEED_CUBE=1 makes the seeder drop the cube before rebuilding it.
 docker-reinit: $(ENV_FILE) ## Drop the governance schema and the cube, then rebuild and seed both
-	$(COMPOSE) exec $(APP) psql -h $$PGHOST -U postgres -d fpa -c "DROP SCHEMA IF EXISTS $(SCHEMA) CASCADE"
-	$(COMPOSE) exec $(APP) curl -sS -u default:fpa "http://clickhouse:8123/" --data-binary "DROP DATABASE IF EXISTS $(CUBE)"
+	$(COMPOSE) exec $(APP) psql -c "DROP SCHEMA IF EXISTS $(SCHEMA) CASCADE"
 	$(COMPOSE) exec $(APP) alembic -c db/alembic.ini upgrade head
 	$(COMPOSE) exec $(APP) python -m db.seed
 	$(COMPOSE) exec -e RESEED_CUBE=1 $(APP) scripts/seed_clickhouse.sh

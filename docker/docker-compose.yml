@@ -1,13 +1,8 @@
-# Local stack: the app, then the stores it depends on. .env holds API keys only, so a
-# missing .env line cannot change the wiring. Services list keys in the same order.
-# A shell variable overrides the ${...} defaults: LOG_LEVEL=DEBUG make docker-local-run
+# Local stack. .env holds API keys only. A shell variable overrides the ${...}
+# defaults: LOG_LEVEL=DEBUG make docker-local-run
+# Passwords are repeated per service: change one, change its pair
+# (PGPASSWORD / POSTGRES_PASSWORD, and both CLICKHOUSE_PASSWORDs), then `docker compose down -v`.
 name: dev
-
-# Same timing in every healthcheck.
-x-healthcheck-timing: &healthcheck-timing
-  interval: 5s
-  timeout: 5s
-  retries: 20
 
 services:
   fpa-dev:
@@ -17,17 +12,11 @@ services:
       dockerfile: docker/Dockerfile
     container_name: fpa_app-1
     environment:
-      # Service name and internal port, not the published one. db/config.py builds
-      # the SQLAlchemy URL from these.
       PGHOST: postgres
-      PGPORT: 5432
       PGUSER: postgres
       PGPASSWORD: fpa
       PGDATABASE: fpa
-      # Must match the clickhouse service below.
       CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: 8123
-      CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: fpa
       # See src/fpa_project/log_config.py.
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -55,7 +44,6 @@ services:
     image: postgres:16-alpine
     container_name: fpa_postgres-1
     environment:
-      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: fpa
       POSTGRES_DB: fpa
     ports:
@@ -63,8 +51,10 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      <<: *healthcheck-timing
       test: ["CMD-SHELL", "pg_isready -U postgres -d fpa"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -80,8 +70,10 @@ services:
         soft: 262144
         hard: 262144
     healthcheck:
-      <<: *healthcheck-timing
-      test: ["CMD-SHELL", "clickhouse-client --password $$CLICKHOUSE_PASSWORD --query 'SELECT 1' || exit 1"]
+      test: ["CMD-SHELL", "clickhouse-client --password fpa --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   # Nothing connects to it yet.
   temporal:
