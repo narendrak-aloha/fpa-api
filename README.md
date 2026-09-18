@@ -19,7 +19,7 @@ fpa-project/
   db/                          Postgres governance store: models, Alembic migrations, YAML seed
   app.py                       FastAPI service: POST /api/v1/query and the query page
   templates/index.html         Browser page: LLM switch, question, answer, DSL, SQL, cited rows
-  requirements.txt             Every dependency; installed/verified on every container start
+  pyproject.toml / uv.lock     Every dependency, pinned; the image builds from the lock
   data/schema_snapshot.json    Static contract derived from seed_fpa.py
   data/out/cube_manifest.json  Seed manifest; app.py reads the company list from it
   src/fpa_project/dsl/         Lexer, AST, parser, schema and compiler
@@ -89,9 +89,9 @@ When a metric, dimension, scenario, or table grain changes, update the seed,
 snapshot, and tests together. The compiler should not infer schema changes from
 live database metadata because that would make query behavior change silently.
 
-The DSL compiler uses only the Python standard library. Install the test dependency
-with `python -m pip install -e ".[dev]"`; run tests with `python -m pytest`.
-The web service and model providers need the packages in `requirements.txt`.
+The DSL compiler uses only the Python standard library. Install everything, including
+the test dependency, with `uv sync --frozen --extra dev`; run tests with
+`python -m pytest`. The web service and model providers need the full set.
 The compiler does not open a database connection. `clickhouse-connect` can be
 added by an application that wants to execute the returned SQL and parameters.
 
@@ -157,7 +157,7 @@ the applied revision is visible on every start.
 Or run the service on the host against the containers:
 
 ```bash
-uv pip install --python .venv/bin/python -r requirements.txt
+uv sync --frozen --extra dev
 scripts/bootstrap.sh                      # ClickHouse + Postgres + Temporal, both seeded
 unset ANTHROPIC_API_KEY                   # only when using the Claude subscription
 .venv/bin/uvicorn app:app --reload --port 8000
