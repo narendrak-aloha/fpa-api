@@ -2,11 +2,13 @@
 # defaults: LOG_LEVEL=DEBUG make docker-local-run
 # Passwords are repeated per service: change one, change its pair
 # (PGPASSWORD / POSTGRES_PASSWORD, and both CLICKHOUSE_PASSWORDs), then `docker compose down -v`.
-name: dev
+name: fpa
 
 services:
   fpa-dev:
     image: fpa-dev
+    # Built here, never pulled: "fpa-dev" is not on Docker Hub.
+    pull_policy: build
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -54,6 +56,8 @@ services:
   # because the state is in Temporal's history and not in this process.
   worker:
     image: fpa-dev
+    # Reuses the image the fpa-dev service builds; never pulled.
+    pull_policy: never
     container_name: fpa_worker-1
     command: ["python", "-m", "fpa_project.recompute.worker"]
     environment:
@@ -85,6 +89,8 @@ services:
   # reached only over HTTP, so there is no shared transaction to hide behind.
   commitment:
     image: fpa-dev
+    # Reuses the image the fpa-dev service builds; never pulled.
+    pull_policy: never
     container_name: fpa_commitment-1
     command: ["uvicorn", "fpa_project.commitment.service:app", "--host", "0.0.0.0", "--port", "8100"]
     environment:

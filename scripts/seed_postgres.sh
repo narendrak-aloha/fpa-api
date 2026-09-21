@@ -5,7 +5,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-PY="${PYTHON:-python3}"
+# Default to the interpreter `uv sync` builds, so an activated venv is not required.
+if [ -x .venv/bin/python ]; then DEFAULT_PY=.venv/bin/python; else DEFAULT_PY=python3; fi
+PY="${PYTHON:-$DEFAULT_PY}"
 export FPA_GOVERNANCE_DB_URL="${FPA_GOVERNANCE_DB_URL:-$("$PY" -c 'from db.config import database_url; print(database_url())')}"
 
 echo "==> waiting for Postgres at ${FPA_GOVERNANCE_DB_URL##*@}"

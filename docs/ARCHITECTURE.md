@@ -19,8 +19,7 @@ fpa-project/
   scripts/seed_postgres.sh     Apply Alembic migrations and load db/seed.yaml
   scripts/seed_clickhouse.sh   Load the cube from data/seed_fpa.py when it is empty
   db/                          Postgres governance store: models, Alembic migrations, YAML seed
-  app.py                       FastAPI service: /api/v1/query, /api/v1/reforecast, the query page
-  templates/index.html         Browser page: LLM switch, question, answer, DSL, SQL, cited rows
+  app.py                       FastAPI service: /api/v1/query, /api/v1/reforecast
   pyproject.toml / uv.lock     Every dependency, pinned; the image builds from the lock
   data/schema_snapshot.json    Static contract derived from seed_fpa.py
   data/out/cube_manifest.json  Seed manifest; app.py reads the company list from it
@@ -136,9 +135,10 @@ variable set regardless of the selected provider; and compose passes only
 `ANTHROPIC_API_KEY` and `GOOGLE_API_KEY` into `fpa_app-1`, so the list
 variables apply only when running on the host.
 
-## Web API and query page
+## Web API
 
-`app.py` exposes the full flow over HTTP and serves a single page at `/`.
+`app.py` exposes the full flow over HTTP. It serves no pages: the front end is the Vue app in
+`fpa-assignment/ui`, which proxies `/api` to this service.
 
 Everything in Docker. The stack is four containers: `fpa_clickhouse-1` (ClickHouse),
 `fpa_postgres-1` (Postgres), `fpa_temporal-1` and `fpa_app-1` (this service). On every start

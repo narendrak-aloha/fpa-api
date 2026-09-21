@@ -24,7 +24,7 @@ commands work on the host against the published ports.
 db/
   alembic.ini              Alembic config (URL, numbered file names)
   models.py                SQLAlchemy models: the source for --autogenerate
-  seed.yaml                Seed data (same content as 002_seed.sql)
+  seed.yaml                Seed data
   seed.py                  Idempotent YAML loader: python -m db.seed
   migrations/
     env.py                 Schema scoping, numbered revision ids, empty-diff guard
@@ -38,8 +38,7 @@ db/
       006_create_variance_reporting.py
       007_create_audit_and_disclosure_log.py
       ...                    new migrations land here as 008_, 009_, ...
-  001_schema.sql           Original raw SQL schema (reference)
-  002_seed.sql             Original raw SQL seed (reference)
+  runtime_roles.sql        Least-privilege role sketch, run by hand (not applied automatically)
 ```
 
 ## Setup
@@ -153,7 +152,7 @@ migration, as 004, 005 and 007 do.
 
 ## Seed data
 
-`seed.yaml` contains the same data as `002_seed.sql` as **one list entry per
+`seed.yaml` holds the data as **one list entry per
 row**. Every entry starts with `table`, the target `<schema>.<table>`, followed
 by that row's columns. Entries are grouped by table with a comment header:
 
@@ -220,19 +219,5 @@ plan_state_transition +6, plan_version +1, scenario_set +3,
 plan_fx_rate +108, audit_event +1
 ```
 
-The resulting rows match `002_seed.sql`, with one intentional difference: the
-audit `event_hash` is `sha256("actor|entity_type|entity_id|action|<compact payload JSON>")`
-over the stored payload. `002_seed.sql` hashed the payload with doubled quotes
-(`{""source"":...}`) because `""` is literal inside a single-quoted SQL string,
-so its hash cannot be recomputed from the stored row.
-
-## Raw SQL alternative
-
-`001_schema.sql` and `002_seed.sql` are kept for reference. They build the same
-schema without Alembic, but a database created this way has no
-`alembic_version` table and must not be mixed with the migrations:
-
-```bash
-psql "$DATABASE_URL" -f db/001_schema.sql
-psql "$DATABASE_URL" -f db/002_seed.sql
-```
+The audit `event_hash` is `sha256("actor|entity_type|entity_id|action|<compact payload JSON>")`
+over the stored payload, so it can be recomputed from the stored row.

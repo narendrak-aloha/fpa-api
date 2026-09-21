@@ -79,8 +79,6 @@ controller or CFO — which is why an analyst is refused on those.
 | GET | `/api/v1/agent-proposals/{id}` | Read a paused agent's draft |
 | POST | `/api/v1/agent-proposals/{id}/decision` | A second human approves or rejects; the agent run then continues |
 
-And `GET /` serves the reference page.
-
 ---
 
 ## The files, by job

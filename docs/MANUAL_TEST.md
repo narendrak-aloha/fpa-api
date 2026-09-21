@@ -4,11 +4,10 @@ Every step is: **what you type or click**, **what you should see**, **what it
 proves**, and **what to do next**. The figures are from this seed and were
 checked on 2026-09-20; they should match to the cent.
 
-Two front ends talk to the same API, and either one works:
+The front end is the Vue app, which talks to this API (the backend serves no page of its own):
 
 | | Where | Notes |
 |---|---|---|
-| Reference page | <http://localhost:8000> | Served by the backend itself |
 | Vue app | <http://localhost:8080> | `npm run dev` in `fpa-assignment/ui` |
 
 ```bash
@@ -18,7 +17,7 @@ make progress                # any run already going
 
 Sign in with a bearer token: `tok-analyst-pl` (reads Poland), `tok-planner`,
 `tok-controller`, `tok-cfo`. On the Vue app they are buttons on the sign-in
-screen; on the reference page, paste one and press **Check identity**.
+screen.
 
 Expect: **Ania Analyst · analyst · RTPL1, RTPL2, RTPL3** for the analyst token.
 If you see nothing, the token was not accepted and nothing else below will work.

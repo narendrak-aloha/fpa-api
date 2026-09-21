@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query as QueryParam
-from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent
@@ -675,8 +674,3 @@ def decide_agent_proposal(proposal_id: str, req: DecisionRequest, who: Principal
         return {"proposal_id": proposal_id, "state": row["state"], "drafts": row["drafts"], "continued": True}
     except Refused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse(ROOT / "templates" / "index.html")

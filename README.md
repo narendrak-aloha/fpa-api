@@ -23,7 +23,8 @@ the log shows `==> API on http://localhost:8000`. Stop it with `Ctrl+C`.
 
 ## Use the frontend
 
-Open **http://localhost:8000**.
+The backend serves no page. Start the Vue app (`npm run dev` in `../ui`) and open
+**http://localhost:8080**; it proxies `/api` to the API on :8000.
 
 Enter a bearer token first: `tok-analyst-pl` reads Poland, `tok-planner` authors
 plans, `tok-controller` reviews covenants and approves plans, and `tok-cfo` locks

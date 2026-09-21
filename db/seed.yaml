@@ -1,5 +1,5 @@
 # Deterministic governance seed for the supplied cube manifest (data/out/cube_manifest.json).
-# Same data as 002_seed.sql. Each entry is one row; `table` names the target <schema>.<table>.
+# Each entry is one row; `table` names the target <schema>.<table>.
 # Load with: python -m db.seed   (idempotent: existing rows are left unchanged)
 
 # role (6 rows)
