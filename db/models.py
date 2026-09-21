@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
-    CHAR, BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer,
+    CHAR, BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer,
     MetaData, Numeric, SmallInteger, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -50,6 +50,11 @@ class AppUser(Base):
     display_name: Mapped[str] = mapped_column(Text)
     email: Mapped[str] = mapped_column(Text, unique=True)
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # Service and agent identities are users too, for attribution; they are
+    # not people, and the variance report close guard asks exactly this.
+    is_human: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # sha256 of the bearer token. The token itself is never stored.
+    api_token_hash: Mapped[str | None] = mapped_column(CHAR(64), unique=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=NOW)
 
 
@@ -65,6 +70,15 @@ class UserRole(Base):
 
     user_id: Mapped[str] = mapped_column(Text, fk("app_user.user_id"), primary_key=True)
     role_code: Mapped[str] = mapped_column(Text, fk("role.role_code"), primary_key=True)
+
+
+class UserCompanyScope(Base):
+    """The entities a user may read. No rows means no scope: reads return nothing."""
+
+    __tablename__ = "user_company_scope"
+
+    user_id: Mapped[str] = mapped_column(Text, fk("app_user.user_id", ondelete="CASCADE"), primary_key=True)
+    company_code: Mapped[str] = mapped_column(Text, fk("dim_company.company_code"), primary_key=True)
 
 
 # --- 002 reference dimensions ------------------------------------------------
@@ -215,6 +229,9 @@ class PlanVersion(Base):
     approved_by: Mapped[str | None] = mapped_column(Text, fk("app_user.user_id"))
     supersedes_plan_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), fk("plan_version.plan_version_id"))
     revision: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    # Bumped by trigger on every update. A writer names the version it read,
+    # and is told it lost if the row has moved on (migration 011).
+    row_version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=NOW)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=NOW)
 
@@ -317,9 +334,16 @@ class PlanApproval(Base):
 # --- 006 variance reporting --------------------------------------------------
 
 class VarianceReport(Base):
+    """A persisted bridge: what it ran on, what it ran over, and what it found.
+
+    OPEN -> INVESTIGATING (an agent may do this) -> REVIEWED -> CLOSED (only a
+    human, enforced by trigger). A gap over the materiality threshold is born
+    ESCALATED and cannot be downgraded.
+    """
+
     __tablename__ = "variance_report"
     __table_args__ = (
-        CheckConstraint("status IN ('OPEN', 'REVIEWED', 'CLOSED')", name="status"),
+        CheckConstraint("status IN ('OPEN', 'INVESTIGATING', 'ESCALATED', 'REVIEWED', 'CLOSED')", name="status"),
         CheckConstraint("status <> 'CLOSED' OR (closed_by IS NOT NULL AND closed_at IS NOT NULL)", name="closed_requires_closer"),
     )
 
@@ -332,13 +356,27 @@ class VarianceReport(Base):
     closed_by: Mapped[str | None] = mapped_column(Text, fk("app_user.user_id"))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=NOW)
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    dsl: Mapped[str | None] = mapped_column(Text)
+    measure: Mapped[str | None] = mapped_column(Text)
+    rollup: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    convention: Mapped[str] = mapped_column(Text, server_default=text("'volume_first'"))
+    report_currency: Mapped[str] = mapped_column(CHAR(3), server_default=text("'USD'"))
+    vintage_closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    line_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    total_gap: Mapped[Decimal] = mapped_column(Numeric(20, 2), server_default=text("0"))
+    materiality_threshold: Mapped[Decimal | None] = mapped_column(Numeric(20, 2))
+    ties: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    status_changed_by: Mapped[str | None] = mapped_column(Text, fk("app_user.user_id"))
 
 
 class VarianceReportLine(Base):
+    """One node of the rollup. ``path`` is its position; level 0 is the total."""
+
     __tablename__ = "variance_report_line"
     __table_args__ = (
         CheckConstraint("line_no > 0", name="line_no_positive"),
         CheckConstraint("jsonb_typeof(dimension_key) = 'object'", name="dimension_key_object"),
+        CheckConstraint("abs(residual) < tolerance", name="ties"),
         CheckConstraint(
             "round(actual_amount - plan_amount, 2) = round(price_variance + volume_variance + mix_variance + "
             "fx_variance + rate_variance + efficiency_variance + residual, 2)",
@@ -358,6 +396,33 @@ class VarianceReportLine(Base):
     rate_variance: Mapped[Decimal] = mapped_column(Numeric(20, 2), server_default=text("0"))
     efficiency_variance: Mapped[Decimal] = mapped_column(Numeric(20, 2), server_default=text("0"))
     residual: Mapped[Decimal] = mapped_column(Numeric(20, 2), server_default=text("0"))
+    level: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    path: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    line_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    tolerance: Mapped[Decimal] = mapped_column(Numeric(20, 2), server_default=text("1"))
+    mix_between_variance: Mapped[Decimal] = mapped_column(Numeric(20, 2), server_default=text("0"))
+
+
+class VarianceReportCitation(Base):
+    """The cube rows behind a leaf line. A node cites its leaves' rows."""
+
+    __tablename__ = "variance_report_citation"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["variance_report_id", "line_no"],
+            [f"{SCHEMA}.variance_report_line.variance_report_id", f"{SCHEMA}.variance_report_line.line_no"],
+            name="fk_variance_report_citation_line", ondelete="CASCADE",
+        ),
+    )
+
+    variance_report_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    line_no: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    company_code: Mapped[str] = mapped_column(Text, primary_key=True)
+    period_month: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    account_code: Mapped[str] = mapped_column(Text, primary_key=True)
+    dim_signature_hash: Mapped[str] = mapped_column(CHAR(16), primary_key=True)
+    plan_amount: Mapped[Decimal] = mapped_column(Numeric(20, 2))
+    actual_amount: Mapped[Decimal] = mapped_column(Numeric(20, 2))
 
 
 # --- 007 audit and disclosure ------------------------------------------------
@@ -386,5 +451,143 @@ class AuditEvent(Base):
     entity_id: Mapped[str] = mapped_column(Text)
     action: Mapped[str] = mapped_column(Text)
     payload: Mapped[Any] = mapped_column(JSONB)
+    # All three are computed by the audit_event_chain trigger (migration 011):
+    # event_key is the row's logical identity, event_hash chains it to the
+    # row before. Application code inserts the facts above and nothing else.
     previous_hash: Mapped[str | None] = mapped_column(CHAR(64))
     event_hash: Mapped[str] = mapped_column(CHAR(64), unique=True)
+    event_key: Mapped[str] = mapped_column(CHAR(64), unique=True)
+
+
+# --- 008 durable recompute ---------------------------------------------------
+
+class PlanDriverBinding(Base):
+    """Which plan lines a driver moves, and how hard.
+
+    ``planning_model.calc_order_dag`` says how drivers depend on each other; it
+    does not say which plan lines they reach. A binding closes that gap: moving
+    this driver scales ``target`` on lines posting to ``account_code``, damped
+    by ``elasticity`` (1.0 is proportional, 0.5 is half the move). The recompute
+    engine reads nothing else, which is what keeps it auditable.
+    """
+
+    __tablename__ = "plan_driver_binding"
+    __table_args__ = (
+        UniqueConstraint("driver_id", "account_code", "target", name="uq_plan_driver_binding_driver_id"),
+        CheckConstraint("target IN ('quantity', 'unit_price')", name="target"),
+        CheckConstraint("elasticity >= 0", name="elasticity_non_negative"),
+    )
+
+    binding_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    driver_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), fk("plan_driver.driver_id", ondelete="CASCADE"))
+    account_code: Mapped[str] = mapped_column(Text, fk("dim_account.account_code"))
+    target: Mapped[str] = mapped_column(Text)
+    elasticity: Mapped[Decimal] = mapped_column(Numeric(10, 6), server_default=text("1"))
+
+
+class RecomputeRun(Base):
+    """The durable record of one Temporal re-forecast execution.
+
+    The workflow's own progress query is the live truth while a run is going;
+    this table is what survives retention, lists past runs for the UI and gives
+    a rejection or a cancellation somewhere permanent to land.
+    """
+
+    __tablename__ = "recompute_run"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('RUNNING', 'AWAITING_APPROVAL', 'PUBLISHING', 'COMPLETED', "
+            "'REJECTED', 'EXPIRED', 'CANCELLED', 'COMPENSATED', 'FAILED')",
+            name="state",
+        ),
+        CheckConstraint("processed_rows >= 0 AND dirty_rows >= 0", name="counts_non_negative"),
+        Index("recompute_run_plan_idx", "plan_version_id", "started_at"),
+        Index("recompute_run_workflow_idx", "workflow_id", "started_at"),
+    )
+
+    # The run's first_execution_run_id: one row per re-forecast, stable across
+    # continue-as-new. Not the workflow id, which every re-forecast of a plan
+    # version shares (see migration 009).
+    run_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(Text)
+    plan_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), fk("plan_version.plan_version_id"))
+    requested_by: Mapped[str] = mapped_column(Text, fk("app_user.user_id"))
+    shocks: Mapped[Any] = mapped_column(JSONB)
+    state: Mapped[str] = mapped_column(Text, server_default=text("'RUNNING'"))
+    phase: Mapped[str] = mapped_column(Text, server_default=text("'STARTING'"))
+    dirty_rows: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    processed_rows: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    decided_by: Mapped[str | None] = mapped_column(Text, fk("app_user.user_id"))
+    detail: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=NOW)
+    ended_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PlanPublication(Base):
+    """One row per attempt to put a revision of a plan version into the cube.
+
+    ``revision`` is allocated here, under a unique constraint, so two runs can
+    never claim the same one. It is also the compensation ledger: the row says
+    whether the cube and the commitment ledger were left agreeing, and the
+    workflow does not finish until it does.
+    """
+
+    __tablename__ = "plan_publication"
+    __table_args__ = (
+        UniqueConstraint("plan_version_id", "revision", name="uq_plan_publication_plan_version_id"),
+        # The idempotence guarantee, held by the database rather than by the
+        # workflow: the same re-forecast asked for twice reuses one revision.
+        UniqueConstraint("plan_version_id", "idempotency_key", name="uq_plan_publication_idempotency"),
+        CheckConstraint("revision > 0", name="revision_positive"),
+        CheckConstraint(
+            "state IN ('RESERVED', 'PUBLISHED', 'COMMITTED', 'SUPERSEDED', 'COMPENSATED', 'COMPENSATION_FAILED')",
+            name="state",
+        ),
+    )
+
+    publication_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    plan_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), fk("plan_version.plan_version_id"))
+    revision: Mapped[int] = mapped_column(Integer)
+    workflow_id: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text, server_default=text("'RESERVED'"))
+    row_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    idempotency_key: Mapped[str] = mapped_column(Text)
+    commitment_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    # The whole cumulative shock set this revision applied, [[driver, from, to], ...].
+    # The next re-forecast starts from the latest COMMITTED one (migration 012).
+    shocks: Mapped[Any] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=NOW)
+    settled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --- 013 agent proposals -------------------------------------------------------
+
+class AgentProposal(Base):
+    """An Agno run paused on a driver proposal, and the human decision on it.
+
+    Created by migration 013 in raw SQL, including its guard trigger; this
+    model exists so ``alembic check`` and ``--autogenerate`` see the table
+    instead of proposing to drop it. Constraint names match what Postgres
+    generated for the unnamed constraints in that migration.
+    """
+
+    __tablename__ = "agent_proposal"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="agent_proposal_run_id_key"),
+        CheckConstraint("state IN ('PENDING','APPROVED','REJECTED')", name="agent_proposal_state_check"),
+        CheckConstraint("decided_by IS NULL OR decided_by <> requested_by", name="agent_proposal_check"),
+        CheckConstraint("(state = 'PENDING') = (decided_by IS NULL)", name="agent_proposal_check1"),
+    )
+
+    proposal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=GEN_UUID)
+    run_id: Mapped[str] = mapped_column(Text)
+    requested_by: Mapped[str] = mapped_column(Text, fk("app_user.user_id"))
+    decided_by: Mapped[str | None] = mapped_column(Text, fk("app_user.user_id"))
+    state: Mapped[str] = mapped_column(Text, server_default=text("'PENDING'"))
+    provider: Mapped[str] = mapped_column(Text)
+    scope: Mapped[Any] = mapped_column(JSONB)
+    drafts: Mapped[Any] = mapped_column(JSONB)
+    paused_run: Mapped[Any] = mapped_column(JSONB)
+    resumed_run: Mapped[Any | None] = mapped_column(JSONB)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=NOW)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))

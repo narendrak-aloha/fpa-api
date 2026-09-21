@@ -16,6 +16,22 @@ from .api_keys import APIKeyRotator
 import uuid
 
 
+def _check_error(run_output: object) -> tuple[str, str] | None:
+    """The guardrail verdict Agno recorded on a run, if any: (type, message).
+
+    Agno puts a check failure's message in ``content`` only when the run had
+    no content yet, so an output check that rejected a model's answer looks
+    like an ordinary answer there. The run's error event carries the type
+    (``input_check_error`` / ``output_check_error``) and the real message,
+    and is the only reliable way to tell a refusal from a repairable answer.
+    """
+    for event in getattr(run_output, "events", None) or []:
+        kind = getattr(event, "error_type", None)
+        if kind in ("input_check_error", "output_check_error"):
+            return kind, str(getattr(event, "content", "") or getattr(event, "error", "") or "")
+    return None
+
+
 def validate_dsl(dsl: str, registry: PlanningRegistry | None = None) -> list[ValidationIssue]:
     """Validate syntax and planning registry semantics without compiling SQL."""
     # Syntax is checked first; registry checks only run against a typed AST.
@@ -48,7 +64,7 @@ class FinOpsPlanner:
             plan = candidate if isinstance(candidate, AgentPlan) else AgentPlan.model_validate(candidate)
         except ValidationError as exc:
             return PlanningResponse(status="ERROR", errors=[ValidationIssue(code="INVALID_OUTPUT", message=str(exc))], masked_context=masked)
-        if plan.out_of_scope:
+        if plan.out_of_scope or plan.proposed_driver:
             return PlanningResponse(status="VALID", plan=plan, masked_context=masked)
         # A typed model response is still untrusted until its DSL is validated.
         errors = validate_dsl(plan.dsl, self.registry)
@@ -67,7 +83,7 @@ class FinOpsPlanner:
 class FPAOrchestrator:
     """Final deterministic gate from an agent plan to an executed response."""
 
-    MAX_SYNTAX_RETRIES = 5
+    MAX_SYNTAX_RETRIES = 2
 
     def __init__(self, tools: FPATools, *, masking_hook: MaskingGateHook | None = None, audit_logger: ExternalAuditLogger | None = None, api_key_rotator: APIKeyRotator | None = None):
         self.tools = tools
@@ -91,6 +107,9 @@ class FPAOrchestrator:
             log_event(self.logger, "dsl_validation_failed", run_id=run_id, status="VALIDATION_ERROR", code=result.errors[0].code if result.errors else "INVALID_OUTPUT")
             message = "; ".join(issue.message for issue in result.errors)
             return AgentFPAResponse(user_query=request.request, generated_dsl=dsl, execution_status="VALIDATION_ERROR", narrative_explanation=narrative, error_message=message)
+        if result.plan.proposed_driver:
+            return AgentFPAResponse(user_query=prepared.request, execution_status="DRAFT",
+                                    narrative_explanation="Driver proposal remains a draft; no active driver was changed.")
         if result.plan.out_of_scope:
             # Nothing is compiled or executed, so the refusal cannot cite numbers either.
             ok, _ = self.arithmetic_hook.verify(result.plan.explanation, [])
@@ -106,16 +125,20 @@ class FPAOrchestrator:
         if query_result.status != "SUCCESS":
             message = "; ".join(error.message for error in query_result.errors)
             return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="VALIDATION_ERROR", narrative_explanation=narrative, assumptions=assumptions, error_message=message)
-        ok, error = self.arithmetic_hook.verify(narrative, query_result.rows)
+        ok, error = self.arithmetic_hook.verify(narrative, query_result.rows, dsl)
         if not ok:
             log_event(self.logger, "arithmetic_verification_failed", run_id=run_id, status="VALIDATION_ERROR")
             return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="VALIDATION_ERROR", assumptions=assumptions, error_message=error)
         log_event(self.logger, "arithmetic_verification_completed", run_id=run_id, status="SUCCESS")
+        # Stated by the orchestrator, not left to the model: every answer says
+        # whose data it is, so a narrower result can never pass as the whole.
+        if query_result.scope:
+            assumptions = [*assumptions, f"Results are limited to your entity scope: {', '.join(query_result.scope)}."]
         log_event(self.logger, "response_completed", run_id=run_id, status="SUCCESS", row_count=query_result.row_count)
-        return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="SUCCESS", narrative_explanation=narrative, assumptions=assumptions, cited_data_rows=query_result.rows)
+        return AgentFPAResponse(user_query=prepared.request, generated_dsl=dsl, execution_status="SUCCESS", narrative_explanation=narrative, assumptions=assumptions, cited_data_rows=query_result.rows, drift_flags=self.tools.drift_flags)
 
     def finalize_with_retries(self, request: PlanningRequest, candidates: list[AgentPlan | dict], narrative: str | None = None) -> AgentFPAResponse:
-        """Try at most five candidate plans, retrying only validation failures."""
+        """Try an initial candidate and one repair, retrying only validation failures."""
         last: AgentFPAResponse | None = None
         for candidate in candidates[:self.MAX_SYNTAX_RETRIES]:
             last = self.finalize(request, candidate, narrative)
@@ -127,8 +150,8 @@ class FPAOrchestrator:
             error_message="no candidate DSL plan supplied",
         )
 
-    def run_with_team(self, team: object, request: PlanningRequest) -> AgentFPAResponse:
-        """Run an Agno Team with a hard five-attempt NL-to-DSL cap."""
+    def run_with_team(self, team: object, request: PlanningRequest, pause_handler=None) -> AgentFPAResponse:
+        """Run an Agno Team with a hard two-attempt NL-to-DSL cap."""
         prepared = self.planner.prepare(request)
         run_id = uuid.uuid4().hex[:12]
         self.masking_hook.before_model(
@@ -156,7 +179,29 @@ class FPAOrchestrator:
             try:
                 self.api_key_rotator.apply_to_team(team)
                 raw = caller(prompt, user_id=self.tools.scope.user_id, dependencies={"scope": self.tools.scope.model_dump()})
+                if getattr(raw, "is_paused", False):
+                    if pause_handler is None:
+                        raise ValueError("durable approval storage is required")
+                    proposal_id = pause_handler(raw)
+                    return AgentFPAResponse(user_query=prepared.request, execution_status="AWAITING_APPROVAL",
+                                            proposal_id=proposal_id, narrative_explanation="Draft saved; awaiting a second human's decision.")
                 content = getattr(raw, "content", raw)
+                check = _check_error(raw)
+                if check and check[0] == "input_check_error":
+                    # An input guardrail refused the request. The same input
+                    # would be refused again, so this is terminal and says why.
+                    log_event(self.logger, "team_attempt_refused", run_id=run_id, attempt=attempt, status="REFUSED")
+                    return AgentFPAResponse(user_query=prepared.request, execution_status="REFUSED",
+                                            error_message=f"refused: {check[1]}")
+                if check and check[0] == "output_check_error":
+                    # An output check (the arithmetic post-hook) rejected the
+                    # answer. Repairable: the next turn is told exactly why.
+                    # Agno leaves the model's output in content here, so the
+                    # reason comes from the error event, not from content.
+                    log_event(self.logger, "team_attempt_failed", run_id=run_id, attempt=attempt, status="OUTPUT_CHECK")
+                    correction = f"{check[1]}. Use only figures that appear in the query results."
+                    last_result = AgentFPAResponse(user_query=prepared.request, execution_status="VALIDATION_ERROR", error_message=check[1])
+                    continue
                 self.audit_logger.record("agno", "response", content, run_id=run_id)
                 log_event(self.logger, "team_attempt_completed", run_id=run_id, attempt=attempt, status="RECEIVED")
             except Exception as exc:
@@ -176,9 +221,9 @@ class FPAOrchestrator:
                 last_result = AgentFPAResponse(user_query=prepared.request, execution_status="VALIDATION_ERROR", error_message=correction)
                 continue
             result = self.finalize(request, candidate, narrative)
-            if result.execution_status in {"SUCCESS", "REJECTED_SCOPE", "OUT_OF_SCOPE"}:
+            if result.execution_status in {"SUCCESS", "REJECTED_SCOPE", "OUT_OF_SCOPE", "DRAFT"}:
                 return result
             last_result = result
             correction = result.error_message or "DSL validation failed"
         log_event(self.logger, "team_attempts_exhausted", run_id=run_id, status="VALIDATION_ERROR", max_attempts=self.MAX_SYNTAX_RETRIES)
-        return last_result or AgentFPAResponse(user_query=prepared.request, execution_status="VALIDATION_ERROR", error_message="five model attempts exhausted")
+        return last_result or AgentFPAResponse(user_query=prepared.request, execution_status="VALIDATION_ERROR", error_message="initial model attempt and one repair exhausted")

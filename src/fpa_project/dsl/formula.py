@@ -158,6 +158,32 @@ def referenced_names(node: FormulaNode) -> set[str]:
     return names
 
 
+# A reference inside one of these reads a *different period's* value of the
+# name, so it is not an edge in the same-period dependency graph. A growth
+# rate off last year's number is a legitimate model; a driver that needs its
+# own current value to compute its own current value is a broken graph. This
+# set is the whole difference between those two, and it is why PRIOR is an
+# operator rather than an offset argument.
+TIME_SHIFTED_FUNCTIONS = {"PRIOR", "LEAD"}
+
+
+def dependency_names(node: FormulaNode) -> set[str]:
+    """Names this formula needs *in the same period*: the cycle-detection edges."""
+    if isinstance(node, Reference):
+        return {node.name}
+    if isinstance(node, Number):
+        return set()
+    if isinstance(node, Unary):
+        return dependency_names(node.operand)
+    if isinstance(node, Binary):
+        return dependency_names(node.left) | dependency_names(node.right)
+    if node.name in TIME_SHIFTED_FUNCTIONS:
+        # The first argument is read from another period; a numeric offset
+        # references nothing.
+        return set().union(*(dependency_names(a) for a in node.arguments[1:]))
+    return set().union(*(dependency_names(a) for a in node.arguments)) if node.arguments else set()
+
+
 def validate_formula(node: FormulaNode, schema: Schema) -> None:
     def walk(current: FormulaNode) -> None:
         # Every reference must resolve to a registered metric or driver before
@@ -195,6 +221,7 @@ def validate_formula(node: FormulaNode, schema: Schema) -> None:
 
 
 def detect_cycles(formulas: dict[str, FormulaNode]) -> None:
+    """Reject a same-period cycle; a PRIOR/LEAD self-reference is not one."""
     visiting: set[str] = set()
     visited: set[str] = set()
 
@@ -207,7 +234,7 @@ def detect_cycles(formulas: dict[str, FormulaNode]) -> None:
         if name in visited or name not in formulas:
             return
         visiting.add(name)
-        for reference in referenced_names(formulas[name]):
+        for reference in dependency_names(formulas[name]):
             visit(reference, path + [name])
         visiting.remove(name)
         visited.add(name)

@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from .ast import Comparison, Literal, Measure, Period, PlanRef, Query, TimeFunction
+from .ast import Aggregate, Comparison, Literal, Measure, Period, PlanRef, Query, TimeFunction
 from .errors import ParseError
 from .lexer import Token, tokenize
 
 
 TIME_FUNCTIONS = {"PRIOR", "LEAD", "YOY", "CAGR", "YTD", "QTD", "MTD", "ROLLING"}
+# Parsed, never accepted: the compiler turns these into a type error that
+# names the measure's aggregation type. See Compiler.validate_measure.
+AGGREGATES = {"SUM", "AVG", "MIN", "MAX"}
 
 
 class Parser:
@@ -101,7 +104,16 @@ class Parser:
             raise ParseError(f"expected measure at position {self.token.position}")
         name = self.token.value
         self.index += 1
-        value: str | TimeFunction = self.parse_time_function(name) if name.upper() in TIME_FUNCTIONS else name
+        value: str | TimeFunction | Aggregate
+        if name.upper() in TIME_FUNCTIONS:
+            value = self.parse_time_function(name)
+        elif name.upper() in AGGREGATES:
+            self.expect("(")
+            metric = self.expect_kind("IDENT").value
+            self.expect(")")
+            value = Aggregate(name.upper(), metric)
+        else:
+            value = name
         alias = None
         if self.token.value.upper() == "AS" and self.tokens[self.index + 1].value.upper() != "OF":
             self.index += 1

@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 HOST="${CLICKHOUSE_HOST:-localhost}"; PORT="${CLICKHOUSE_PORT:-8123}"
 USER="${CLICKHOUSE_USER:-default}"; PASSWORD="${CLICKHOUSE_PASSWORD:-fpa}"
 PY="${PYTHON:-python3}"
-query() { curl -sS --fail-with-body -u "${USER}:${PASSWORD}" "http://${HOST}:${PORT}/" --data-binary "$1"; }
+query() { curl -sS --fail -u "${USER}:${PASSWORD}" "http://${HOST}:${PORT}/" --data-binary "$1"; }
 
 echo "==> waiting for ClickHouse on ${HOST}:${PORT}"
 for _ in $(seq 1 60); do query "SELECT 1" >/dev/null 2>&1 && break || sleep 1; done

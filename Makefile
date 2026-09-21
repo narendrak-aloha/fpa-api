@@ -1,12 +1,21 @@
-# Local Docker stack: ClickHouse, Postgres, Temporal and the fpa_app-1 app container.
+# Local Docker stack: ClickHouse, Postgres, Temporal, the recompute worker,
+# the Commitment Service and the fpa_app-1 app container.
 # --env-file: without it compose reads docker/.env, not the repo root.
 ENV_FILE := .env
 COMPOSE  := docker compose --env-file $(ENV_FILE) -f docker/docker-compose.yml
 APP     := fpa-dev
+WORKER  := worker
 SCHEMA  := fpa_governance
+PLAN    ?= PV-2026-0001
+# Dev bearer tokens from db/seed.yaml: tok-planner, tok-controller, tok-cfo, tok-analyst-pl.
+TOKEN   ?= tok-planner
+API     := curl -sS -H 'content-type: application/json' -H "Authorization: Bearer $(TOKEN)"
 
 .PHONY: help env env-check docker-local-run docker-local-run-d docker-local-stop docker-local-logs docker-seed-db docker-reinit docker-shell \
-        docker-make-migrations docker-migrate docker-migrate-down docker-migrate-status
+        docker-make-migrations docker-migrate docker-migrate-down docker-migrate-status \
+        worker-logs worker-kill worker-restart plan-state plan-create plan-lock audit-verify audit-tamper audit-untamper bridge \
+        reforecast review approve reject cancel progress \
+        commitment-fail commitment-ok commitment-ledger replay-record test test-unit
 
 $(ENV_FILE):
 	@cp .env.example $(ENV_FILE) && echo "created $(ENV_FILE) from .env.example — edit it to add API keys"
@@ -75,6 +84,101 @@ docker-seed-db: $(ENV_FILE) ## Re-run both seeders by hand (the app already seed
 # RESEED_CUBE=1 makes the seeder drop the cube before rebuilding it.
 docker-reinit: $(ENV_FILE) ## Drop the governance schema and the cube, then rebuild and seed both
 	$(COMPOSE) exec $(APP) psql -c "DROP SCHEMA IF EXISTS $(SCHEMA) CASCADE"
+	$(COMPOSE) exec $(APP) psql -c "DROP SCHEMA IF EXISTS commitment_service CASCADE"
 	$(COMPOSE) exec $(APP) alembic -c db/alembic.ini upgrade head
 	$(COMPOSE) exec $(APP) python -m db.seed
 	$(COMPOSE) exec -e RESEED_CUBE=1 $(APP) scripts/seed_clickhouse.sh
+
+# --------------------------------------------------------------------------
+# Durable recompute. PLAN=<code> overrides the plan version (default PV-2026-0001).
+# --------------------------------------------------------------------------
+worker-logs: ## Follow the recompute worker's log
+	$(COMPOSE) logs -f $(WORKER)
+
+worker-kill: ## Kill the worker mid-run (the durability demo; the run must survive)
+	$(COMPOSE) kill $(WORKER)
+	@echo "worker killed. Bring it back with: make worker-restart"
+
+worker-restart: ## Start the worker again; a parked or half-done run picks up where it was
+	$(COMPOSE) up -d $(WORKER)
+	@$(COMPOSE) logs -f --tail=20 $(WORKER)
+
+plan-state: ## Show the plan version's state and where it may go next
+	@$(API) localhost:8000/api/v1/plan-versions/$(PLAN) | python3 -m json.tool
+
+plan-create: ## Author a new DRAFT plan version as the planner (PLAN=PV-2026-0002)
+	@$(API) -X POST localhost:8000/api/v1/plan-versions -d '{"plan_version_code":"$(PLAN)"}' | python3 -m json.tool
+
+plan-lock: ## Take a DRAFT plan through IN_REVIEW (planner), APPROVED (controller) and LOCKED (cfo)
+	@$(API) -X POST localhost:8000/api/v1/plan-versions/$(PLAN)/transition -d '{"to_state":"IN_REVIEW"}' | python3 -m json.tool
+	@$(API) localhost:8000/api/v1/plan-versions/$(PLAN) | \
+	  python3 -c 'import sys,json; p=json.load(sys.stdin); print(json.dumps({"expected_version":p["row_version"],"covenant_ok":True,"note":"covenant reviewed"}))' | \
+	  curl -sS -H 'content-type: application/json' -H "Authorization: Bearer tok-controller" -X PUT \
+	  localhost:8000/api/v1/plan-versions/$(PLAN)/covenant --data-binary @- | python3 -m json.tool
+	@curl -sS -H 'content-type: application/json' -H "Authorization: Bearer tok-controller" -X POST \
+	  localhost:8000/api/v1/plan-versions/$(PLAN)/transition -d '{"to_state":"APPROVED","note":"covenant reviewed"}' | python3 -m json.tool
+	@curl -sS -H 'content-type: application/json' -H "Authorization: Bearer tok-cfo" -X POST \
+	  localhost:8000/api/v1/plan-versions/$(PLAN)/transition -d '{"to_state":"LOCKED"}' | python3 -m json.tool
+
+audit-verify: ## Recompute the audit hash chain; fails loudly on any altered row
+	@$(API) localhost:8000/api/v1/audit/verify | python3 -m json.tool
+
+audit-tamper: ## Alter one historical audit row by hand (trigger off, UPDATE, trigger on) so audit-verify fails
+	$(COMPOSE) exec -T $(APP) psql -c "ALTER TABLE $(SCHEMA).audit_event DISABLE TRIGGER audit_event_no_update" \
+	  -c "UPDATE $(SCHEMA).audit_event SET payload = payload || '{\"tampered\": true}' WHERE audit_event_id = (SELECT min(audit_event_id) FROM $(SCHEMA).audit_event)" \
+	  -c "ALTER TABLE $(SCHEMA).audit_event ENABLE TRIGGER audit_event_no_update"
+	@echo "now: make audit-verify"
+
+audit-untamper: ## Put the tampered row back
+	$(COMPOSE) exec -T $(APP) psql -c "ALTER TABLE $(SCHEMA).audit_event DISABLE TRIGGER audit_event_no_update" \
+	  -c "UPDATE $(SCHEMA).audit_event SET payload = payload - 'tampered' WHERE audit_event_id = (SELECT min(audit_event_id) FROM $(SCHEMA).audit_event)" \
+	  -c "ALTER TABLE $(SCHEMA).audit_event ENABLE TRIGGER audit_event_no_update"
+
+bridge: ## Run the Poland Q2 bridge and persist the report (DSL= overrides)
+	@$(API) -X POST localhost:8000/api/v1/bridge -d "{\"dsl\":\"$(or $(DSL),SELECT services_revenue BY practice, grade WHERE geo_country = 'PL' FOR PERIOD 2026-Q2 COMPARE PLAN pv='PV-2026-0001' TO ACTUAL BRIDGE)\"}" | python3 -m json.tool
+
+reforecast: ## Shock a driver and start a re-forecast as TOKEN's user (DRIVER=, FROM=, TO=)
+	@$(API) -X POST localhost:8000/api/v1/reforecast \
+	  -d '{"plan_version_code":"$(PLAN)","driver_code":"$(or $(DRIVER),utilisation)","from_value":$(or $(FROM),0.75),"to_value":$(or $(TO),0.70)}' | python3 -m json.tool
+
+progress: ## Show the running workflow's phase and counters
+	@$(API) localhost:8000/api/v1/reforecast/$(PLAN)/progress | python3 -m json.tool
+
+review: ## Record a passing covenant review, as the controller, on the successor the running re-forecast drafted into
+	@SUCC=$$($(API) localhost:8000/api/v1/reforecast/$(PLAN)/progress | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_version_code"])'); \
+	test -n "$$SUCC" || { echo "no running re-forecast for $(PLAN)"; exit 1; }; \
+	$(API) localhost:8000/api/v1/plan-versions/$$SUCC | \
+	  python3 -c 'import sys,json; p=json.load(sys.stdin); print(json.dumps({"expected_version":p["row_version"],"covenant_ok":True,"note":"$(or $(NOTE),covenant reviewed)"}))' | \
+	  curl -sS -H 'content-type: application/json' -H "Authorization: Bearer tok-controller" -X PUT \
+	  localhost:8000/api/v1/plan-versions/$$SUCC/covenant --data-binary @- | python3 -m json.tool
+
+approve: ## Approve the parked run as the CFO; run `make review` first (TOKEN=tok-planner to see a self-approval refused)
+	@curl -sS -H 'content-type: application/json' -H "Authorization: Bearer $(or $(AS),tok-cfo)" -X POST \
+	  localhost:8000/api/v1/reforecast/$(PLAN)/decision -d '{"approved":true,"comment":"$(or $(NOTE),approved)"}' | python3 -m json.tool
+
+reject: ## Reject the parked run as the CFO
+	@curl -sS -H 'content-type: application/json' -H "Authorization: Bearer $(or $(AS),tok-cfo)" -X POST \
+	  localhost:8000/api/v1/reforecast/$(PLAN)/decision -d '{"approved":false,"comment":"$(or $(NOTE),rejected)"}' | python3 -m json.tool
+
+cancel: ## Cancel the running re-forecast
+	@$(API) -X POST localhost:8000/api/v1/reforecast/$(PLAN)/cancel | python3 -m json.tool
+
+commitment-fail: ## Make the Commitment Service fail every call (RATE=, MODE=error|timeout|mixed)
+	@curl -sS -X POST localhost:8100/admin/failure-rate -H 'content-type: application/json' \
+	  -d '{"rate":$(or $(RATE),1.0),"mode":"$(or $(MODE),error)"}' | python3 -m json.tool
+
+commitment-ok: ## Put the Commitment Service back to a zero failure rate
+	@curl -sS -X POST localhost:8100/admin/failure-rate -H 'content-type: application/json' \
+	  -d '{"rate":0.0}' | python3 -m json.tool
+
+commitment-ledger: ## Show what the Commitment Service currently holds
+	@curl -sS "localhost:8100/commitments?plan_version=$(PLAN)" | python3 -m json.tool
+
+replay-record: ## Re-record the workflow histories the replay test runs against
+	$(COMPOSE) exec $(APP) python -m tests.record_history
+
+test: ## Run every test, including the ones that need the stack
+	$(COMPOSE) exec $(APP) python -m pytest
+
+test-unit: ## Run only the tests that need nothing running
+	python -m pytest -m "not integration"

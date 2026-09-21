@@ -20,7 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query as QueryParam
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -36,8 +36,42 @@ from fpa_project.config import (  # noqa: E402
     claude_api_model, clickhouse as clickhouse_settings, gemini_model,
 )
 from fpa_project.log_config import configure as configure_logging  # noqa: E402
+from fpa_project.governance import Principal, Refused, authenticate  # noqa: E402
 
 app = FastAPI(title="FPA Query API", version="1.0.0")
+
+
+def current_user(authorization: str | None = Header(default=None)) -> Principal:
+    """Who is asking, from the bearer token and nothing else.
+
+    Every governed endpoint takes this. The identity, the roles and the entity
+    scope all come from the tables the token resolves to; nothing in a request
+    body can name a different user or a wider scope.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="send Authorization: Bearer <token>", headers={"WWW-Authenticate": "Bearer"})
+    try:
+        return authenticate(authorization.split(" ", 1)[1].strip())
+    except Refused as exc:
+        raise HTTPException(status_code=401, detail=str(exc), headers={"WWW-Authenticate": "Bearer"}) from exc
+
+def global_plan_user(request: Request, who: Principal = Depends(current_user)) -> Principal:
+    """Global plans/drivers/audit require coverage of the entire model.
+
+    Scoped analysts use compiler queries and scoped reports. Until plans have
+    their own entity membership, treating a global write as an entity write
+    would expose or change data outside the caller's scope.
+    """
+    from fpa_project.governance import require_global_scope
+    try:
+        require_global_scope(who)
+    except Refused as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if request.method not in {"GET", "HEAD"}:
+        if not who.is_human or not who.has_role("planner", "controller", "cfo"):
+            raise HTTPException(status_code=403, detail="a human planner, controller or CFO is required")
+    return who
+
 
 configure_logging()
 log = logging.getLogger("fpa.api")
@@ -78,6 +112,24 @@ def get_client():
     return _client
 
 
+def scoped_tools(scope):
+    from fpa_project.dsl.parser import parse_query
+    from fpa_project.dsl.compiler import vintage_lookup
+    from fpa_project.reconciliation import reconcile
+    execute = clickhouse_executor(get_client())
+    cache = {}
+    def drift_check(dsl):
+        parsed = parse_query(dsl)
+        if not parsed.as_of:
+            return None
+        if dsl not in cache:
+            sql, params = vintage_lookup(None)
+            latest = list(execute(sql, params))[0]["closed_at"].isoformat()
+            cache[dsl] = reconcile(dsl, parsed.as_of, latest, SecurityContext(scope.allowed_companies, scope.max_estimated_rows), execute, scope.user_id)
+        return cache[dsl]
+    return FPATools(scope, executor=execute, drift_checker=drift_check)
+
+
 def provider_configured(provider: str) -> bool:
     if provider == "claude-code":
         return shutil.which("claude") is not None
@@ -97,6 +149,7 @@ def build_model(provider: str):
 
 class QueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=8_000)
+    # Optional narrowing. It can only shrink the caller's scope, never widen it.
     companies: list[str] | None = None
     max_rows: int = Field(default=1_000_000, ge=1)
     provider: Literal["claude-code", "claude-api", "gemini"] = "claude-code"
@@ -121,12 +174,13 @@ def _jsonable(value: Any) -> Any:
 
 
 @app.post("/api/v1/query", response_model=QueryResponse)
-def query(req: QueryRequest, http_request: Request) -> QueryResponse:
+def query(req: QueryRequest, http_request: Request, who: Principal = Depends(current_user)) -> QueryResponse:
     started = time.monotonic()
-    log.info("query received | provider=%s companies=%s | %r", req.provider, len(req.companies or ALL_COMPANIES), req.query[:120])
-    # Scope comes from the caller, never from the model or DSL text.
-    companies = frozenset(req.companies) if req.companies else ALL_COMPANIES
-    scope = UserScope(user_id="web-ui", allowed_companies=companies, max_estimated_rows=req.max_rows)
+    # Scope comes from the token, never from the model, the DSL text or the
+    # request body. A body that names companies can only narrow it.
+    companies = who.companies & frozenset(req.companies) if req.companies else who.companies
+    log.info("query received | user=%s provider=%s companies=%s", who.user_id, req.provider, len(companies))
+    scope = UserScope(user_id=who.user_id, allowed_companies=companies, max_estimated_rows=req.max_rows)
     text = req.query.strip()
 
     def elapsed() -> int:
@@ -140,7 +194,7 @@ def query(req: QueryRequest, http_request: Request) -> QueryResponse:
         )
 
     try:
-        tools = FPATools(scope, executor=clickhouse_executor(get_client()))
+        tools = scoped_tools(scope)
     except Exception as exc:
         return fail(f"ClickHouse unavailable: {exc}")
     orchestrator = FPAOrchestrator(tools)
@@ -158,7 +212,9 @@ def query(req: QueryRequest, http_request: Request) -> QueryResponse:
             mode = "agno_team"
             # Built per request so every member's tools carry this caller's scope.
             team = build_agno_team(model=build_model(req.provider), toolset=tools)
-            result = orchestrator.run_with_team(team, request)
+            from fpa_project.agent_team.proposals import save_pause
+            result = orchestrator.run_with_team(team, request,
+                pause_handler=lambda output: save_pause(output, scope, req.provider, tools.schema))
     except Exception as exc:
         return fail(f"{type(exc).__name__}: {exc}")
 
@@ -185,9 +241,440 @@ def query(req: QueryRequest, http_request: Request) -> QueryResponse:
     return response
 
 
+class ReconcileRequest(BaseModel):
+    dsl: str = Field(min_length=1, max_length=8000)
+    left_as_of: str
+    right_as_of: str
+
+
+@app.post("/api/v1/reconcile")
+def reconcile_vintages(req: ReconcileRequest, who: Principal = Depends(current_user)):
+    from fpa_project.reconciliation import reconcile
+    try:
+        return reconcile(req.dsl, req.left_as_of, req.right_as_of, SecurityContext(who.companies),
+                         clickhouse_executor(get_client()), who.user_id)
+    except (ValueError, DSLValidationError, ParseError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/v1/providers")
 def providers() -> list[dict[str, Any]]:
     return [{"id": p, "configured": provider_configured(p)} for p in ("claude-code", "claude-api", "gemini")]
+
+
+# --------------------------------------------------------------------------
+# Who am I
+# --------------------------------------------------------------------------
+@app.get("/api/v1/me")
+def me(who: Principal = Depends(current_user)) -> dict[str, Any]:
+    return {"user_id": who.user_id, "display_name": who.display_name, "roles": sorted(who.roles),
+            "companies": sorted(who.companies), "is_human": who.is_human}
+
+
+# --------------------------------------------------------------------------
+# The variance bridge
+# --------------------------------------------------------------------------
+class BridgeRequest(BaseModel):
+    dsl: str = Field(min_length=1, max_length=8_000, description="a FinOpsExpr query ending in COMPARE PLAN ... TO ACTUAL BRIDGE")
+    companies: list[str] | None = None
+    convention: Literal["volume_first", "price_first"] = "volume_first"
+    materiality: float | None = Field(default=None, ge=0)
+    persist: bool = True
+
+
+class ReportStatusRequest(BaseModel):
+    status: Literal["OPEN", "INVESTIGATING", "ESCALATED", "REVIEWED", "CLOSED"]
+
+
+@app.post("/api/v1/bridge")
+def bridge(req: BridgeRequest, who: Principal = Depends(current_user)) -> dict[str, Any]:
+    """Run a bridge over the matched plan/actual set and persist the report.
+
+    The DSL goes through the same compiler as every other query, with the
+    caller's scope, so the bridge can only run over rows the caller may see.
+    """
+    from fpa_project.bridge_service import DEFAULT_MATERIALITY, BridgeError, run_bridge
+    from fpa_project.dsl.bridge import Convention
+
+    companies = who.companies & frozenset(req.companies) if req.companies else who.companies
+    try:
+        report = run_bridge(
+            req.dsl, clickhouse_executor(get_client()), SecurityContext(companies),
+            actor=who.user_id, convention=Convention(req.convention),
+            materiality=Decimal(str(req.materiality)) if req.materiality is not None else DEFAULT_MATERIALITY,
+            persist=req.persist,
+        )
+    except (ParseError, DSLValidationError, BridgeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return report.to_dict()
+
+
+class VintageBridgeRequest(BaseModel):
+    dsl: str = Field(min_length=1, max_length=8_000, description="a bridge query without AS OF")
+    left_as_of: str = Field(description="the earlier close, e.g. 2026-07-05T18:00:00")
+    right_as_of: str = Field(description="the later close, e.g. 2026-08-12T09:30:00")
+
+
+@app.post("/api/v1/bridge/vintages")
+def vintage_bridge(req: VintageBridgeRequest, who: Principal = Depends(current_user)) -> dict[str, Any]:
+    """The same bridge at two closes: the change split into restated, reversed and new lines."""
+    from fpa_project.bridge_service import BridgeError, vintage_bridge as run
+
+    try:
+        return run(req.dsl, req.left_as_of, req.right_as_of, clickhouse_executor(get_client()), SecurityContext(who.companies))
+    except (ParseError, DSLValidationError, BridgeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/variance-reports/{report_id}")
+def variance_report(report_id: str, who: Principal = Depends(current_user)) -> dict[str, Any]:
+    from fpa_project.bridge_service import load_report
+
+    _require_report_scope(report_id, who)
+    report = load_report(report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail=f"no variance report {report_id}")
+    return report
+
+
+@app.get("/api/v1/variance-reports/{report_id}/citations")
+def variance_report_citations(report_id: str, path: str = "", limit: int = QueryParam(default=200, ge=1, le=200), offset: int = QueryParam(default=0, ge=0), full_rows: bool = False, who: Principal = Depends(current_user)) -> dict[str, Any]:
+    """Drill-through: the cube rows behind a node, with the vintage they were read at.
+
+    ``path`` is the node's rollup path joined with '|'; empty means the root.
+    """
+    from fpa_project.bridge_service import citations_for
+
+    _require_report_scope(report_id, who)
+    node_path = [p for p in path.split("|") if p] if path else []
+    rows = citations_for(report_id, node_path, limit=limit + 1, offset=offset)
+    more = len(rows) > limit
+    rows = rows[:limit]
+    source_rows = []
+    if full_rows and rows:
+        if rows[0]["vintage_closed_at"] is None:
+            raise HTTPException(status_code=422, detail="forecast-change citations have no actual-ledger vintage; use citation amounts")
+        from fpa_project.dsl.compiler import compile_citation_rows
+        compiled = compile_citation_rows(rows, rows[0]["vintage_closed_at"].isoformat(), SecurityContext(who.companies))
+        source_rows = list(clickhouse_executor(get_client())(compiled.sql, compiled.params))
+    return {"report_id": report_id, "path": node_path, "rows": rows, "source_rows": source_rows,
+            "next_offset": offset + limit if more else None}
+
+
+@app.post("/api/v1/variance-reports/{report_id}/status")
+def variance_report_status(report_id: str, req: ReportStatusRequest, who: Principal = Depends(current_user)) -> dict[str, Any]:
+    """Move a report. An agent may investigate; the database lets only a human close."""
+    from fpa_project.bridge_service import StatusRefused, set_status
+
+    _require_report_scope(report_id, who)
+    try:
+        return {"report_id": report_id, **set_status(report_id, req.status, who.user_id)}
+    except StatusRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _require_report_scope(report_id: str, who: Principal) -> None:
+    from uuid import UUID
+    from fpa_project.bridge_service import report_in_scope
+
+    try:
+        UUID(report_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid report ID") from exc
+    if not report_in_scope(report_id, who.companies):
+        raise HTTPException(status_code=404, detail="report not found in your entity scope")
+
+
+# --------------------------------------------------------------------------
+# Plan version governance: the state machine gate, distinct from the workflow's
+# --------------------------------------------------------------------------
+class CreatePlanVersionRequest(BaseModel):
+    plan_version_code: str = Field(min_length=1, max_length=40)
+    model_code: str = "FPA-2026"
+    plan_year: int = Field(default=2026, ge=2000, le=2200)
+    covenant_note: str = ""
+
+
+class TransitionRequest(BaseModel):
+    to_state: Literal["DRAFT", "IN_REVIEW", "APPROVED", "LOCKED", "SUPERSEDED", "REJECTED"]
+    note: str = ""
+    # The row_version the caller read. Two writers on one version: the
+    # second is told it lost rather than silently overwriting.
+    expected_version: int | None = None
+
+
+class CovenantRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    covenant_ok: bool
+    note: str = ""
+
+
+class DriverRequest(BaseModel):
+    expected_version: str | None = None
+    model_code: str = "FPA-2026"
+    driver_code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    driver_name: str = Field(min_length=1)
+    formula: str = Field(min_length=1, max_length=4_000)
+    unit: str = "ratio"
+    value_type: Literal["numeric", "percentage", "currency", "count"] = "numeric"
+
+
+class PlanningModelRequest(BaseModel):
+    formulas: dict[str, str]
+
+
+class FxRateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    period_month: str = Field(pattern=r"^\d{4}-\d{2}-01$")
+    from_currency: str = Field(min_length=3, max_length=3)
+    rate: str
+
+
+def _refusal(exc: Refused) -> HTTPException:
+    message = str(exc)
+    status = 404 if message.startswith("no plan version") or message.startswith("no planning model") else 409
+    return HTTPException(status_code=status, detail=message)
+
+
+@app.get("/api/v1/plan-versions")
+def plan_versions(who: Principal = Depends(global_plan_user)) -> list[dict[str, Any]]:
+    from fpa_project.governance import list_plan_versions
+
+    return [{k: _jsonable(v) for k, v in row.items()} for row in list_plan_versions()]
+
+
+@app.post("/api/v1/plan-versions")
+def create_plan_version(req: CreatePlanVersionRequest, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    from fpa_project.governance import create_plan_version as create
+
+    try:
+        return create(req.plan_version_code, req.model_code, req.plan_year, who.user_id, req.covenant_note)
+    except Refused as exc:
+        raise _refusal(exc) from exc
+
+
+@app.get("/api/v1/plan-versions/{plan_version_code}")
+def plan_version(plan_version_code: str, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    from fpa_project.governance import describe
+
+    try:
+        return {k: _jsonable(v) for k, v in describe(plan_version_code).items()}
+    except Refused as exc:
+        raise _refusal(exc) from exc
+
+
+@app.post("/api/v1/plan-versions/{plan_version_code}/transition")
+def transition_plan_version(plan_version_code: str, req: TransitionRequest, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    """Move a plan version through the governance state machine.
+
+    A different gate from the workflow's approval signal, refusing for
+    different reasons: this one is about roles, declared transitions and the
+    database's own constraints; that one is about a run parked mid-flight.
+    """
+    from fpa_project.governance import transition
+
+    try:
+        return transition(plan_version_code, req.to_state, who.user_id, req.note, req.expected_version)
+    except Refused as exc:
+        raise _refusal(exc) from exc
+
+
+@app.put("/api/v1/plan-versions/{plan_version_code}/covenant")
+def set_covenant(plan_version_code: str, req: CovenantRequest, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    """A controller-only field, enforced by the database whoever calls this."""
+    from fpa_project.governance import set_covenant as write
+
+    try:
+        return write(plan_version_code, req.covenant_ok, req.note, who.user_id, req.expected_version)
+    except Refused as exc:
+        raise _refusal(exc) from exc
+
+
+@app.put("/api/v1/plan-versions/{plan_version_code}/fx-rates")
+def set_fx_rate(plan_version_code: str, req: FxRateRequest, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    from fpa_project.governance import set_plan_fx_rate
+
+    try:
+        return set_plan_fx_rate(plan_version_code, req.period_month, req.from_currency.upper(), req.rate, who.user_id, req.expected_version)
+    except Refused as exc:
+        raise _refusal(exc) from exc
+
+
+@app.get("/api/v1/drivers")
+def drivers(model_code: str = "FPA-2026", who: Principal = Depends(global_plan_user)) -> list[dict[str, Any]]:
+    from fpa_project.governance import list_drivers
+
+    return [{k: _jsonable(v) for k, v in row.items()} for row in list_drivers(model_code)]
+
+
+@app.post("/api/v1/drivers")
+def save_driver(req: DriverRequest, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    """Save a driver. Its formula is parsed, resolved and cycle-checked first."""
+    from fpa_project.governance import save_driver as save
+
+    try:
+        return save(req.model_code, req.driver_code, req.driver_name, req.formula, who.user_id, req.unit, req.value_type, expected_version=req.expected_version)
+    except Refused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/api/v1/planning-models/{model_code}")
+def save_planning_model(model_code: str, req: PlanningModelRequest, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    """Save a whole driver library. The DAG is derived, and a cycle is refused."""
+    from fpa_project.governance import save_planning_model as save
+
+    try:
+        return save(model_code, req.formulas, who.user_id)
+    except Refused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/audit")
+def audit(entity_type: str | None = None, entity_id: str | None = None, limit: int = 50, who: Principal = Depends(global_plan_user)) -> list[dict[str, Any]]:
+    from fpa_project.governance import audit_trail
+
+    return [{k: _jsonable(v) for k, v in row.items()} for row in audit_trail(entity_type, entity_id, min(limit, 500))]
+
+
+@app.get("/api/v1/audit/verify")
+def audit_verify(who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    """Recompute the whole hash chain. Fails loudly on any altered row."""
+    from dataclasses import asdict
+
+    from fpa_project.governance import verify_audit_chain
+
+    return asdict(verify_audit_chain())
+
+
+# --------------------------------------------------------------------------
+# Re-forecast: the durable recompute behind a driver shock
+# --------------------------------------------------------------------------
+class ShockRequest(BaseModel):
+    plan_version_code: str = Field(default="PV-2026-0001")
+    driver_code: str
+    from_value: float = Field(gt=0, description="the driver's value before the change")
+    to_value: float = Field(gt=0)
+    scenario_codes: list[str] | None = None
+
+
+class DecisionRequest(BaseModel):
+    approved: bool
+    comment: str = ""
+
+
+@app.post("/api/v1/reforecast")
+async def start_reforecast(req: ShockRequest, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    """Shock a driver and start the re-forecast.
+
+    One run per plan version at a time. A second shock arriving while one is
+    going does not start a competing workflow and is not dropped either: it
+    goes to the running run's update handler, which folds it in or refuses it
+    and says which. The requester is the token's user.
+    """
+    from fpa_project.recompute import client as recompute_client
+    from fpa_project.recompute.models import DriverShock
+
+    if not who.has_role("planner", "controller", "cfo"):
+        raise HTTPException(status_code=403, detail=f"{who.user_id} may not start a re-forecast; that needs the planner, controller or cfo role")
+    shock = DriverShock(driver_code=req.driver_code, from_value=req.from_value, to_value=req.to_value)
+    try:
+        return await recompute_client.start(req.plan_version_code, [shock], who.user_id, req.scenario_codes)
+    except Exception as exc:
+        # A refused update arrives as WorkflowUpdateFailedError("Workflow update
+        # failed"), with the validator's actual reason on .cause. The caller
+        # needs the reason: a refusal nobody can read is barely better than
+        # silently ignoring the shock.
+        reason = getattr(getattr(exc, "cause", None), "message", None) or str(exc)
+        log.warning("re-forecast start failed: %s", reason)
+        raise HTTPException(status_code=409, detail=reason) from exc
+
+
+@app.post("/api/v1/reforecast/{plan_version_code}/decision")
+async def decide_reforecast(plan_version_code: str, req: DecisionRequest, who: Principal = Depends(global_plan_user)) -> dict[str, str]:
+    """Approve or reject the parked run, as the token's user.
+
+    Segregation of duties is not checked here. The workflow asks the database,
+    which is the only place that can answer truthfully; a refused decision
+    shows up under `refusals` in the progress query and the run stays parked.
+    """
+    from fpa_project.recompute import client as recompute_client
+
+    await recompute_client.decide(plan_version_code, req.approved, who.user_id, req.comment)
+    return {"plan_version_code": plan_version_code, "decision": "APPROVE" if req.approved else "REJECT", "status": "SENT"}
+
+
+@app.post("/api/v1/reforecast/{plan_version_code}/cancel")
+async def cancel_reforecast(plan_version_code: str, who: Principal = Depends(global_plan_user)) -> dict[str, str]:
+    from fpa_project.recompute import client as recompute_client
+
+    await recompute_client.cancel(plan_version_code)
+    return {"plan_version_code": plan_version_code, "status": "CANCELLING"}
+
+
+@app.get("/api/v1/reforecast/{plan_version_code}/progress")
+async def reforecast_progress(plan_version_code: str, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
+    """The live phase and counters, straight from the running workflow."""
+    from fpa_project.recompute import client as recompute_client
+
+    result = await recompute_client.progress(plan_version_code)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no re-forecast running for {plan_version_code}")
+    return result
+
+
+@app.get("/api/v1/reforecast/{plan_version_code}/runs")
+def reforecast_runs(plan_version_code: str, who: Principal = Depends(global_plan_user)) -> list[dict[str, Any]]:
+    """Past and present runs, from the durable record."""
+    from sqlalchemy import text as sql_text
+
+    from fpa_project.governance import engine
+
+    with engine().begin() as conn:
+        rows = conn.execute(
+            sql_text(
+                "SELECT r.run_id, r.state, r.phase, r.dirty_rows, r.processed_rows, r.requested_by, r.decided_by, "
+                "       r.detail, r.shocks, r.started_at, r.ended_at "
+                "FROM fpa_governance.recompute_run r JOIN fpa_governance.plan_version v USING (plan_version_id) "
+                "WHERE v.plan_version_code = :code ORDER BY r.started_at DESC LIMIT 50"
+            ),
+            {"code": plan_version_code},
+        ).mappings().all()
+    return [{k: _jsonable(v) for k, v in row.items()} for row in rows]
+
+
+@app.get("/api/v1/agent-proposals/{proposal_id}")
+def agent_proposal(proposal_id: str, who: Principal = Depends(global_plan_user)):
+    from fpa_project.agent_team.proposals import load
+    try:
+        row = load(proposal_id)
+    except Refused as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {key: row[key] for key in ("proposal_id", "requested_by", "decided_by", "state", "drafts", "created_at", "decided_at")}
+
+
+@app.post("/api/v1/agent-proposals/{proposal_id}/decision")
+def decide_agent_proposal(proposal_id: str, req: DecisionRequest, who: Principal = Depends(global_plan_user)):
+    from fpa_project.agent_team.proposals import decide, load, resume_snapshot
+    if not who.is_human or not who.has_role("controller", "cfo"):
+        raise HTTPException(status_code=403, detail="human controller approval required")
+    try:
+        decide(proposal_id, who.user_id, req.approved)
+        row = load(proposal_id)
+        original_scope = UserScope.model_validate(row["scope"])
+        # Confirm current scope has not been revoked since the proposal.
+        from fpa_project.governance import engine
+        from sqlalchemy import text as sql
+        with engine().connect() as conn:
+            active = conn.execute(sql("SELECT active FROM fpa_governance.app_user WHERE user_id=:u"), {"u": original_scope.user_id}).scalar()
+            current = frozenset(conn.execute(sql("SELECT company_code FROM fpa_governance.user_company_scope WHERE user_id=:u"), {"u": original_scope.user_id}).scalars())
+        if not active or not (original_scope.allowed_companies or frozenset()) <= current:
+            raise Refused("requester's original scope has been revoked; continuation refused")
+        tools = scoped_tools(original_scope)
+        team = build_agno_team(model=build_model(row["provider"]), toolset=tools)
+        resume_snapshot(row, team)
+        return {"proposal_id": proposal_id, "state": row["state"], "drafts": row["drafts"], "continued": True}
+    except Refused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/")

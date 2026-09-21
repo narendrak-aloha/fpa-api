@@ -33,13 +33,16 @@ class AgentPlan(BaseModel):
     explanation: str = Field(default="", max_length=2_000)
     assumptions: list[str] = Field(default_factory=list, max_length=20)
     out_of_scope: bool = False
+    proposed_driver: bool = False
 
     @model_validator(mode="after")
     def _dsl_matches_scope(self) -> "AgentPlan":
         # A refusal must not smuggle a query in; an answer must carry one.
         if self.out_of_scope and self.dsl.strip():
             raise ValueError("out_of_scope plans must not contain dsl")
-        if not self.out_of_scope and not self.dsl.strip():
+        if self.proposed_driver and (self.dsl.strip() or self.out_of_scope):
+            raise ValueError("driver proposals must not contain queries or scope refusals")
+        if not self.out_of_scope and not self.proposed_driver and not self.dsl.strip():
             raise ValueError("dsl is required unless out_of_scope is true")
         return self
 
@@ -72,7 +75,9 @@ class AgentFPAResponse(BaseModel):
 
     user_query: str
     generated_dsl: str = ""
-    execution_status: Literal["SUCCESS", "VALIDATION_ERROR", "REJECTED_SCOPE", "OUT_OF_SCOPE"]
+    execution_status: Literal["SUCCESS", "VALIDATION_ERROR", "REJECTED_SCOPE", "OUT_OF_SCOPE", "AWAITING_APPROVAL", "DRAFT", "REFUSED"]
+    drift_flags: list[dict[str, Any]] = Field(default_factory=list)
+    proposal_id: str | None = None
     narrative_explanation: str | None = None
     assumptions: list[str] = Field(default_factory=list)
     cited_data_rows: list[dict[str, Any]] = Field(default_factory=list)
@@ -92,8 +97,13 @@ class QueryToolResult(BaseModel):
     status: Literal["SUCCESS", "VALIDATION_ERROR", "REJECTED_SCOPE", "EXECUTION_ERROR"]
     rows: list[dict[str, Any]] = Field(default_factory=list)
     columns: list[str] = Field(default_factory=list)
+    drift_flags: list[dict[str, Any]] = Field(default_factory=list)
     row_count: int = 0
     errors: list[ToolError] = Field(default_factory=list)
+    # The companies the rows are limited to, from the caller's token. Without
+    # it a model asked about Germany sees Poland's zero-filled rows and
+    # reports Germany as zero. Found live.
+    scope: list[str] = Field(default_factory=list)
 
 
 class DriverProposal(BaseModel):

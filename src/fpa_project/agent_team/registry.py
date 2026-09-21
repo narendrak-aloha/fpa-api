@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fpa_project.dsl.ast import Query, TimeFunction
+from fpa_project.dsl.ast import Aggregate, Query, TimeFunction
+from fpa_project.dsl.compiler import Compiler
 from fpa_project.dsl.errors import DSLValidationError, ParseError
 from fpa_project.dsl.formula import detect_cycles, parse_formula, validate_formula
 from fpa_project.dsl.schema import Schema
@@ -34,6 +35,14 @@ class PlanningRegistry:
             if predicate.operator not in {"=", "!=", "IN", "NOT IN"}:
                 issues.append(RegistryIssue("INVALID_OPERATOR", f"unsupported operator: {predicate.operator}", predicate.field))
         for measure in query.measures:
+            if isinstance(measure.name, Aggregate):
+                # The compiler owns the type rule; ask it, so the agent gets
+                # the same explanation a human would at the API.
+                try:
+                    Compiler(self.schema).validate_aggregate(measure.name)
+                except DSLValidationError as exc:
+                    issues.append(RegistryIssue("ILLEGAL_AGGREGATION", str(exc), measure.name.metric))
+                continue
             names = self._measure_names(measure.name)
             for name in names:
                 if name not in self.schema.metric_names:

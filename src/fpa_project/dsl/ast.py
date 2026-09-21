@@ -19,8 +19,22 @@ class TimeFunction:
 
 
 @dataclass(frozen=True)
+class Aggregate:
+    """An explicit SUM/AVG/MIN/MAX around a measure in a query.
+
+    Kept as its own node rather than rejected at parse time so the compiler
+    can say *why* it is wrong: ``SUM(utilisation)`` is a type error about
+    ratio measures, and the message has to explain that, not report an
+    unexpected token.
+    """
+
+    name: str
+    metric: str
+
+
+@dataclass(frozen=True)
 class Measure:
-    name: str | TimeFunction
+    name: str | TimeFunction | Aggregate
     alias: str | None = None
 
 

@@ -11,14 +11,15 @@ static schema snapshot derived from `seed_fpa.py`, and emits parameterised SQL.
 fpa-project/
   Makefile                     docker-local-run / -stop / -logs, docker-seed-db, docker-reinit,
                                docker-make-migrations, docker-migrate*, docker-shell (make help)
-  docker/docker-compose.yml    ClickHouse, Postgres, Temporal and the fpa_app-1 app container
+  docker/docker-compose.yml    ClickHouse, Postgres, Temporal, the recompute worker,
+                               the Commitment Service and the fpa_app-1 app container
   docker/Dockerfile            Image for fpa_app-1: API, Alembic migrations and both seeders
   docker/entrypoint.sh         fpa_app-1 start: wait for Postgres, migrate, seed, then serve
   scripts/bootstrap.sh         Start the stack, then seed Postgres and the ClickHouse cube
   scripts/seed_postgres.sh     Apply Alembic migrations and load db/seed.yaml
   scripts/seed_clickhouse.sh   Load the cube from data/seed_fpa.py when it is empty
   db/                          Postgres governance store: models, Alembic migrations, YAML seed
-  app.py                       FastAPI service: POST /api/v1/query and the query page
+  app.py                       FastAPI service: /api/v1/query, /api/v1/reforecast, the query page
   templates/index.html         Browser page: LLM switch, question, answer, DSL, SQL, cited rows
   pyproject.toml / uv.lock     Every dependency, pinned; the image builds from the lock
   data/schema_snapshot.json    Static contract derived from seed_fpa.py
@@ -26,7 +27,12 @@ fpa-project/
   src/fpa_project/dsl/         Lexer, AST, parser, schema and compiler
   src/fpa_project/agent_team/  Safe NL-to-FinOpsExpr Agno boundary (team, tools, orchestrator,
                                ClaudeCodeModel for the Claude subscription)
-  tests/                       Positive and negative parser/compiler tests
+  src/fpa_project/recompute/   Durable re-forecast: workflow, activities, engine, worker
+                               (docs/RECOMPUTE.md)
+  src/fpa_project/commitment/  The downstream Commitment Service, as its own process
+  src/fpa_project/governance.py  Plan version state machine; a gate distinct from the workflow's
+  tests/                       Parser/compiler tests, recompute engine, workflow and replay tests
+  tests/histories/             Recorded Temporal histories the replay test runs against
 ```
 
 ## Architecture and data flow

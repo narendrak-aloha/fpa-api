@@ -27,6 +27,16 @@ services:
       # claude-code needs neither; it uses the login mounted below.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # Where the API finds the workflow client and the commitment ledger.
+      TEMPORAL_HOST: temporal:7233
+      FPA_COMMITMENT_URL: http://commitment:8100
+      FPA_CONTINUE_AFTER_PARTITIONS: ${FPA_CONTINUE_AFTER_PARTITIONS:-1000}
+      FPA_APPROVAL_TIMEOUT_HOURS: ${FPA_APPROVAL_TIMEOUT_HOURS:-72}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/api/v1/providers"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
     ports:
       - "8000:8000"
     volumes:
@@ -38,6 +48,62 @@ services:
       postgres:
         condition: service_healthy
       clickhouse:
+        condition: service_healthy
+
+  # The recompute worker. Kill it mid-run and start it again: the run resumes,
+  # because the state is in Temporal's history and not in this process.
+  worker:
+    image: fpa-dev
+    container_name: fpa_worker-1
+    command: ["python", "-m", "fpa_project.recompute.worker"]
+    environment:
+      FPA_ROLE: worker
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: fpa
+      PGDATABASE: fpa
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PASSWORD: fpa
+      TEMPORAL_HOST: temporal:7233
+      FPA_COMMITMENT_URL: http://commitment:8100
+      FPA_PARTITION_SIZE: ${FPA_PARTITION_SIZE:-5000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_HANDLER: ${LOG_HANDLER:-console}
+    volumes:
+      - ..:/app
+    depends_on:
+      fpa-dev:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+
+  # The downstream counterparty. Its own process and its own Postgres schema,
+  # reached only over HTTP, so there is no shared transaction to hide behind.
+  commitment:
+    image: fpa-dev
+    container_name: fpa_commitment-1
+    command: ["uvicorn", "fpa_project.commitment.service:app", "--host", "0.0.0.0", "--port", "8100"]
+    environment:
+      FPA_ROLE: commitment
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: fpa
+      PGDATABASE: fpa
+      # Zero by default. Turn it up at runtime:
+      #   curl -X POST localhost:8100/admin/failure-rate -d '{"rate":1.0}' -H 'content-type: application/json'
+      FPA_COMMITMENT_FAILURE_RATE: ${FPA_COMMITMENT_FAILURE_RATE:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_HANDLER: ${LOG_HANDLER:-console}
+    ports:
+      - "8100:8100"
+    volumes:
+      - ..:/app
+    depends_on:
+      postgres:
         condition: service_healthy
 
   postgres:
@@ -75,16 +141,21 @@ services:
       timeout: 5s
       retries: 20
 
-  # Nothing connects to it yet.
+  # The durable recompute's history lives here. UI on :8233, gRPC on :7233.
   temporal:
     image: temporalio/temporal:latest
     container_name: fpa_temporal-1
-    command: server start-dev --ip 0.0.0.0
+    command: server start-dev --ip 0.0.0.0 --db-filename /home/temporal/fpa.db
     ports:
       - "7233:7233"
       - "8233:8233"
     volumes:
-      - temporal_data:/root/.temporal
+      - temporal_data:/home/temporal
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--address", "127.0.0.1:7233", "--limit", "1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
 volumes:
   clickhouse_data:

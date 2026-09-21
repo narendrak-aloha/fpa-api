@@ -18,6 +18,28 @@ LOGGER_NAME = "fpa_project.agent_team"
 _HANDLER_MARKER = "_fpa_terminal_handler"
 
 
+class _StderrHandler(logging.StreamHandler):
+    """A stream handler that follows ``sys.stderr`` rather than capturing it.
+
+    The handler is created once per process, but pytest's capture and
+    uvicorn's reload both swap ``sys.stderr`` after that; binding the stream
+    at construction time would send every later line to the old one.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(stream=None)
+
+    @property
+    def stream(self):  # type: ignore[override]
+        import sys
+
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, value) -> None:
+        pass
+
+
 def configure_terminal_logging(level: int = logging.INFO) -> logging.Logger:
     """Configure one concise terminal handler without exposing sensitive data."""
     # Reuse one marked handler so repeated worker construction does not
@@ -26,7 +48,7 @@ def configure_terminal_logging(level: int = logging.INFO) -> logging.Logger:
     logger.setLevel(level)
     logger.propagate = False
     if not any(getattr(handler, _HANDLER_MARKER, False) for handler in logger.handlers):
-        handler = logging.StreamHandler()
+        handler = _StderrHandler()
         setattr(handler, _HANDLER_MARKER, True)
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
         logger.addHandler(handler)

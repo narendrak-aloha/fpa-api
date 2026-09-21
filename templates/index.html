@@ -91,6 +91,11 @@ details.raw summary{cursor:pointer;color:var(--muted)}
     <p class="sub">Ask a question about the company's finances in plain English.</p>
   </header>
 
+  <section class="ask" aria-label="Identity">
+    <label for="token">Bearer token</label>
+    <input id="token" type="password" autocomplete="off" placeholder="Enter your token">
+    <button id="identify">Check identity</button><p id="identity" role="status"></p>
+  </section>
   <!-- 1. The question -->
   <section class="ask" aria-label="Ask a question">
     <textarea id="q" rows="3" placeholder="e.g. What was services revenue by practice in Q2 2026?"></textarea>
@@ -128,11 +133,42 @@ details.raw summary{cursor:pointer;color:var(--muted)}
     <p class="title" id="aTitle"></p>
     <p class="text" id="aText"></p>
     <p class="note" id="aNote"></p>
+    <h3>FinOpsExpr</h3><pre id="answerDsl"></pre>
+    <p id="proposalStatus"></p><pre id="driftFlags"></pre>
+    <button id="showBridge">Run variance bridge from this DSL</button>
     <div class="figures" id="figures">
       <h3>Figures</h3>
       <div class="tw"><table id="tbl"></table></div>
     </div>
     <button class="explainBtn" id="explainBtn" aria-expanded="false" aria-controls="explain">Explain this answer (debug)</button>
+  </section>
+
+  <section class="answer" aria-label="Variance bridge">
+    <h2>Variance bridge · USD</h2>
+    <p id="bridgeStatus" role="status">Run a query ending in BRIDGE, then open its bridge.</p>
+    <div id="waterfall"></div><div id="bridgeNodes"></div>
+    <pre id="citationRows"></pre>
+  </section>
+  <section class="answer" aria-label="Plan governance">
+    <h2>Plan and re-forecast</h2>
+    <label for="planCode">Plan version</label><input type="text" id="planCode" value="PV-2026-0001">
+    <div class="bar"><button id="loadPlan">Load</button><button id="createPlan">Create draft</button></div>
+    <pre id="planState"></pre>
+    <label for="reviewNote">Review note</label><input type="text" id="reviewNote">
+    <div class="bar"><button id="passCovenant">Record covenant pass</button><button id="failCovenant">Record covenant breach</button></div>
+    <div class="bar"><button data-transition="IN_REVIEW">Submit for review</button><button data-transition="APPROVED">Approve plan</button><button data-transition="REJECTED">Reject plan</button><button data-transition="LOCKED">Lock plan</button></div>
+    <label for="driverCode">Driver</label><input type="text" id="driverCode" value="utilisation">
+    <label for="fromValue">Current value</label><input id="fromValue" type="number" value="0.75" step="0.01" min="0.000001">
+    <label for="toValue">Proposed value</label><input id="toValue" type="number" value="0.74" step="0.01" min="0.000001">
+    <div class="bar"><button id="startRun">Re-forecast</button><button id="watchRun">Watch progress</button><button id="stopWatch">Stop watching</button></div>
+    <progress id="runMeter" max="1" value="0"></progress><pre id="runProgress" aria-live="polite"></pre>
+    <p>Review the successor's covenant before approving the run. Load the successor using the button below, record the verdict, then approve.</p>
+    <div class="bar"><button id="loadSuccessor">Load successor</button><button id="approveRun">Approve run</button><button id="rejectRun">Reject run</button><button id="cancelRun">Cancel run</button></div>
+    <h3>Agent proposal review</h3>
+    <label for="proposalId">Proposal ID</label><input id="proposalId" type="text">
+    <div class="bar"><button id="readProposal">Review draft</button><button id="approveProposal">Approve proposal</button><button id="rejectProposal">Reject proposal</button></div>
+    <pre id="proposalDetails"></pre>
+    <p id="actionStatus" role="status"></p>
   </section>
 
   <!-- 4. How the answer was worked out: hidden until asked for -->
@@ -234,7 +270,7 @@ async function ask() {
   try {
     const res = await fetch("/api/v1/query", {
       method: "POST",
-      headers: {"Content-Type": "application/json"},
+      headers: {"Content-Type": "application/json", "Authorization": `Bearer ${$("token").value.trim()}`},
       body: JSON.stringify({query, provider: document.querySelector('input[name="provider"]:checked').value, companies: companies.length ? companies : null}),
     });
     const data = await res.json();
@@ -324,6 +360,7 @@ const OUTCOME = {
   SUCCESS:          {cls: "",        title: ""},
   OUT_OF_SCOPE:     {cls: "neutral", title: "This question isn't about the finance data."},
   REJECTED_SCOPE:   {cls: "bad",     title: "You don't have access to all the data this question needs."},
+  REFUSED:          {cls: "bad",     title: "The request was refused by a safety guardrail."},
   VALIDATION_ERROR: {cls: "bad",     title: "The question couldn't be turned into a valid data request. Try rewording it."},
   REQUEST_ERROR:    {cls: "bad",     title: "Something went wrong while getting the answer."},
 };
@@ -349,6 +386,10 @@ function render(query, d) {
   $("aTitle").classList.toggle("hidden", !outcome.title);
   let text = a.narrative_explanation || "";
   if (!text && status === "SUCCESS") text = rows.length ? "Here are the figures." : "No data matched your question.";
+  $("answerDsl").textContent = a.generated_dsl || "";
+  $("driftFlags").textContent = a.drift_flags?.length ? "Recorded vintage drift:\n" + JSON.stringify(a.drift_flags, null, 2) : "";
+  $("proposalStatus").textContent = a.proposal_id ? `Draft proposal: ${a.proposal_id}. Use the proposal review controls below.` : "";
+  $("showBridge").disabled = !/\bBRIDGE\b/i.test(a.generated_dsl || "");
   $("aText").textContent = text;
   $("aText").classList.toggle("hidden", !text);
   $("aNote").textContent = status === "SUCCESS" ? "" : (a.error_message || "");
@@ -404,6 +445,168 @@ function render(query, d) {
 
   $("answer").classList.remove("hidden");
   $("explainBtn").classList.toggle("hidden", failed && !dsl && !assumptions.length);
+}
+
+// Governed actions share the authenticated API; tokens stay in this page's memory.
+async function api(path, method = "GET", body) {
+  const token = $("token").value.trim();
+  if (!token) throw new Error("Enter your bearer token first.");
+  const response = await fetch(`/api/v1/${path}`, {
+    method, headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`},
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data));
+  return data;
+}
+function action(id, task, status = "actionStatus") {
+  $(id).onclick = async () => {
+    $(id).disabled = true;
+    try { await task(); }
+    catch (error) { $(status).textContent = error.message; }
+    finally { $(id).disabled = false; }
+  };
+}
+action("identify", async () => {
+  const user = await api("me");
+  $("identity").textContent = `${user.display_name} · ${user.roles.join(", ")} · ${user.companies.join(", ")}`;
+}, "identity");
+let loadedPlan = null, runCode = null, successorCode = null, watchTimer = null;
+const planCode = () => $("planCode").value.trim();
+const planPath = () => `plan-versions/${encodeURIComponent(planCode())}`;
+async function loadPlan() {
+  loadedPlan = await api(planPath());
+  $("planState").textContent = JSON.stringify(loadedPlan, null, 2);
+}
+action("loadPlan", loadPlan);
+action("createPlan", async () => {
+  await api("plan-versions", "POST", {plan_version_code: planCode()}); await loadPlan();
+});
+for (const [id, verdict] of [["passCovenant", true], ["failCovenant", false]]) {
+  action(id, async () => {
+    if (!loadedPlan || loadedPlan.plan_version_code !== planCode()) throw new Error("Load the plan before reviewing its covenant.");
+    await api(`${planPath()}/covenant`, "PUT", {covenant_ok: verdict, note: $("reviewNote").value, expected_version: loadedPlan.row_version});
+    await loadPlan();
+  });
+}
+document.querySelectorAll("[data-transition]").forEach(button => {
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      if (!loadedPlan || loadedPlan.plan_version_code !== planCode()) throw new Error("Load this plan before changing its state.");
+      await api(`${planPath()}/transition`, "POST", {to_state: button.dataset.transition, expected_version: loadedPlan.row_version, note: $("reviewNote").value});
+      await loadPlan(); $("actionStatus").textContent = "Plan transition recorded.";
+    } catch (error) { $("actionStatus").textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+});
+function stopWatching() { clearTimeout(watchTimer); watchTimer = null; }
+let watchGeneration = 0;
+async function watchProgress(generation) {
+  try {
+    const progress = await api(`reforecast/${encodeURIComponent(runCode)}/progress`);
+    if (generation !== watchGeneration) return;
+    successorCode = progress.target_version_code;
+    $("runProgress").textContent = JSON.stringify(progress, null, 2);
+    $("runMeter").max = Math.max(1, progress.dirty_rows);
+    $("runMeter").value = progress.processed_rows;
+    if (progress.phase !== "DONE") watchTimer = setTimeout(() => watchProgress(generation), 2000);
+  } catch (error) { if (generation === watchGeneration) $("runProgress").textContent = error.message; }
+}
+function startWatching(code) { stopWatching(); runCode = code; watchProgress(++watchGeneration); }
+action("watchRun", async () => startWatching(planCode()));
+action("stopWatch", async () => { ++watchGeneration; stopWatching(); });
+action("startRun", async () => {
+  const code = planCode();
+  const response = await api("reforecast", "POST", {plan_version_code: code, driver_code: $("driverCode").value.trim(), from_value: Number($("fromValue").value), to_value: Number($("toValue").value)});
+  $("actionStatus").textContent = JSON.stringify(response); startWatching(code);
+});
+action("loadSuccessor", async () => {
+  if (!successorCode) throw new Error("Watch a run until its successor is available.");
+  $("planCode").value = successorCode; await loadPlan();
+});
+for (const [id, approved] of [["approveRun", true], ["rejectRun", false]]) {
+  action(id, async () => {
+    if (!runCode) throw new Error("Watch the originating plan's run first.");
+    await api(`reforecast/${encodeURIComponent(runCode)}/decision`, "POST", {approved, comment: $("reviewNote").value});
+    $("actionStatus").textContent = "Decision sent. Progress shows whether governance accepted it.";
+  });
+}
+action("cancelRun", async () => {
+  if (!runCode) throw new Error("Watch the run first.");
+  await api(`reforecast/${encodeURIComponent(runCode)}/cancel`, "POST");
+  $("actionStatus").textContent = "Cancellation sent.";
+});
+
+function drawWaterfall(node) {
+  const legs = ["price", "volume", "mix", "fx", "rate", "efficiency"];
+  let total = Number(node.plan_amount);
+  const bars = [{label: "Plan", from: 0, to: total, value: node.plan_amount}];
+  for (const leg of legs) {
+    const next = total + Number(node[leg]);
+    bars.push({label: niceName(leg), from: total, to: next, value: node[leg]}); total = next;
+  }
+  bars.push({label: "Actual", from: 0, to: Number(node.actual_amount), value: node.actual_amount});
+  const min = Math.min(0, ...bars.flatMap(b => [b.from, b.to]));
+  const max = Math.max(0, ...bars.flatMap(b => [b.from, b.to]));
+  const y = value => 190 - (value - min) / (max - min || 1) * 145;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 800 255"); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Variance waterfall from plan to actual, in USD");
+  bars.forEach((bar, i) => {
+    const rect = document.createElementNS(ns, "rect");
+    rect.setAttribute("x", 10 + i * 99); rect.setAttribute("width", 78);
+    rect.setAttribute("y", Math.min(y(bar.from), y(bar.to)));
+    rect.setAttribute("height", Math.max(1, Math.abs(y(bar.from) - y(bar.to))));
+    rect.setAttribute("fill", i === 0 || i === 7 ? "#2B4C7E" : Number(bar.value) < 0 ? "#9A3B26" : "#2F6B4F");
+    svg.appendChild(rect);
+    [bar.label, bar.value].forEach((value, j) => {
+      const text = document.createElementNS(ns, "text"); text.textContent = value;
+      text.setAttribute("x", 10 + i * 99); text.setAttribute("y", 215 + j * 20); text.setAttribute("font-size", 11); svg.appendChild(text);
+    });
+  });
+  $("waterfall").replaceChildren(svg, el("p", `Residual: ${node.residual} USD · tolerance: ${node.tolerance} · ties: ${node.ties}`));
+}
+action("showBridge", async () => {
+  const report = await api("bridge", "POST", {dsl: $("answerDsl").textContent});
+  $("bridgeStatus").textContent = `${report.status} · vintage ${report.vintage.vintage} · ${report.vintage.closed_at} · all levels tie: ${report.ties}`;
+  drawWaterfall(report.root); $("bridgeNodes").replaceChildren(); $("citationRows").textContent = "";
+  // Expand one level at a time so thousands of signatures do not block rendering.
+  function addNode(node, parent) {
+    const details = el("details"), summary = el("summary", `${node.path.join(" / ") || "Total"} · gap ${node.gap} · residual ${node.residual}`);
+    details.appendChild(summary); parent.appendChild(details);
+    details.addEventListener("toggle", () => {
+      if (!details.open || details.dataset.loaded) return;
+      details.dataset.loaded = "true";
+      let nextOffset = 0;
+      const drill = el("button", "Show waterfall and source rows"); details.appendChild(drill);
+      drill.onclick = async () => {
+        drawWaterfall(node); drill.disabled = true;
+        try {
+          const result = await api(`variance-reports/${encodeURIComponent(report.report_id)}/citations?path=${encodeURIComponent(node.path.join("|"))}&offset=${nextOffset}&full_rows=true`);
+          $("citationRows").textContent = JSON.stringify({citations: result.rows, ledger: result.source_rows}, null, 2);
+          nextOffset = result.next_offset;
+          drill.textContent = nextOffset === null ? "All rows shown" : "Show next source rows";
+        } catch (error) { $("citationRows").textContent = error.message; }
+        finally { drill.disabled = nextOffset === null; }
+      };
+      for (const child of node.children) addNode(child, details);
+    });
+  }
+  addNode(report.root, $("bridgeNodes"));
+}, "bridgeStatus");
+
+
+action("readProposal", async () => {
+  const result = await api(`agent-proposals/${encodeURIComponent($("proposalId").value.trim())}`);
+  $("proposalDetails").textContent = JSON.stringify(result, null, 2);
+});
+for (const [id, approved] of [["approveProposal", true], ["rejectProposal", false]]) {
+  action(id, async () => {
+    const result = await api(`agent-proposals/${encodeURIComponent($("proposalId").value.trim())}/decision`, "POST", {approved});
+    $("proposalDetails").textContent = JSON.stringify(result, null, 2);
+  });
 }
 </script>
 </body>

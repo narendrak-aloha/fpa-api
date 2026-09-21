@@ -11,37 +11,36 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import yaml
-from sqlalchemy import Numeric, create_engine, literal_column, select
+from sqlalchemy import Numeric, create_engine, literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Connection
 
 from db.config import database_url
 from db.models import (
     SCHEMA,
-    AppUser, AuditEvent, DimAccount, DimCompany, DimCostCenter, LedgerVintage, PlanDriver, PlanFxRate,
-    PlanningDimension, PlanningMeasure, PlanningModel, PlanStateTransition, PlanVersion, Role, ScenarioSet, UserRole,
+    AppUser, AuditEvent, DimAccount, DimCompany, DimCostCenter, LedgerVintage, PlanDriver, PlanDriverBinding,
+    PlanFxRate, PlanningDimension, PlanningMeasure, PlanningModel, PlanStateTransition, PlanVersion, Role,
+    ScenarioDriverOverride, ScenarioSet, UserCompanyScope, UserRole,
 )
 
 DB_DIR = Path(__file__).resolve().parent
 
 # Load order respects foreign keys.
 TABLES = [
-    Role, AppUser, UserRole, DimCompany, DimAccount, DimCostCenter, LedgerVintage,
-    PlanningModel, PlanningDimension, PlanningMeasure, PlanDriver, PlanStateTransition,
-    PlanVersion, ScenarioSet, PlanFxRate, AuditEvent,
+    Role, AppUser, UserRole, DimCompany, UserCompanyScope, DimAccount, DimCostCenter, LedgerVintage,
+    PlanningModel, PlanningDimension, PlanningMeasure, PlanDriver, PlanDriverBinding, PlanStateTransition,
+    PlanVersion, ScenarioSet, ScenarioDriverOverride, PlanFxRate, AuditEvent,
 ]
 
 
-def event_hash(row: dict[str, Any]) -> str:
-    payload = json.dumps(row["payload"], separators=(",", ":"))
-    chain_input = "|".join([row["actor_user_id"] or "", row["entity_type"], row["entity_id"], row["action"], payload])
-    return hashlib.sha256(chain_input.encode()).hexdigest()
+def token_hash(token: str) -> str:
+    """What app_user.api_token_hash holds: the token is never stored."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def resolve(conn: Connection, model: type, row: dict[str, Any]) -> dict[str, Any]:
@@ -54,11 +53,23 @@ def resolve(conn: Connection, model: type, row: dict[str, Any]) -> dict[str, Any
         row["plan_version_id"] = conn.execute(
             select(PlanVersion.plan_version_id).where(PlanVersion.plan_version_code == code)
         ).scalar_one()
+    if "scenario_code" in row and model is ScenarioDriverOverride:
+        # plan_version_code was resolved to plan_version_id just above.
+        code, plan_version_id = row.pop("scenario_code"), row.pop("plan_version_id")
+        row["scenario_set_id"] = conn.execute(
+            select(ScenarioSet.scenario_set_id)
+            .where(ScenarioSet.scenario_code == code, ScenarioSet.plan_version_id == plan_version_id)
+        ).scalar_one()
+    if "driver_code" in row and model is not PlanDriver:
+        code = row.pop("driver_code")
+        # scalar_one raises if the seed ever grows a second vintage of a driver,
+        # which is the right moment to make the reference explicit.
+        row["driver_id"] = conn.execute(select(PlanDriver.driver_id).where(PlanDriver.driver_code == code)).scalar_one()
     for column in model.__table__.columns:
         if isinstance(column.type, Numeric) and isinstance(row.get(column.name), (str, int, float)):
             row[column.name] = Decimal(str(row[column.name]))
-    if model is AuditEvent and not row.get("event_hash"):
-        row["event_hash"] = event_hash(row)
+    if model is AppUser and "api_token" in row:
+        row["api_token_hash"] = token_hash(row.pop("api_token"))
     return row
 
 
@@ -81,8 +92,18 @@ def load(conn: Connection, records: list[dict[str, Any]]) -> dict[str, int]:
         rows = [resolve(conn, model, row) for row in seed.get(model.__tablename__, [])]
         if not rows:
             continue
-        inserted = conn.execute(insert(model).values(rows).on_conflict_do_nothing().returning(literal_column("1")))
-        counts[model.__tablename__] = len(inserted.all())
+        # One INSERT per distinct key set. A multi-row insert takes its column
+        # list from the first row, so a column that only some rows set (say
+        # is_human on a service identity) would be dropped from the others
+        # without a word and the server default applied instead.
+        inserted = 0
+        by_keys: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+        for row in rows:
+            by_keys.setdefault(tuple(sorted(row)), []).append(row)
+        for group in by_keys.values():
+            result = conn.execute(insert(model).values(group).on_conflict_do_nothing().returning(literal_column("1")))
+            inserted += len(result.all())
+        counts[model.__tablename__] = inserted
     return counts
 
 
@@ -93,6 +114,9 @@ def main() -> None:
     seed = yaml.safe_load(args.file.read_text())
     engine = create_engine(database_url())
     with engine.begin() as conn:
+        # Plan FX rates are controller-only fields (migration 011). The seed
+        # writes them as the controller who owns them.
+        conn.execute(text("SELECT set_config('fpa.actor', 'u-controller', true)"))
         counts = load(conn, seed)
     for table, inserted in counts.items():
         print(f"  {table:<26} +{inserted}")

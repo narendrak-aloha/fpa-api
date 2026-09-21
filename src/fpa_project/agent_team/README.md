@@ -22,7 +22,7 @@ code, or commits model changes.
 - The plan's `assumptions` are carried into `AgentFPAResponse.assumptions`.
 - `ArithmeticVerificationPostHook` rejects any number in the narrative that is
   not present in the returned rows, and the orchestrator retries the team at
-  most five times.
+  most twice (the initial attempt and one repair).
 - The Agno adapter is optional and exposes no database, filesystem, SQL, or code
   execution tools. Human approval is required outside this module for any
   future model change; `ModelChangeProposal` is always `DRAFT` and the module
