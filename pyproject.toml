@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fpa-project"
 version = "0.1.0"
-description = "Schema-aware FinOpsExpr to ClickHouse SQL compiler"
+description = "FinOps planning API: FastAPI service over a ClickHouse cube and Postgres governance store, with a Claude/Gemini agent team and durable Temporal re-forecast"
 requires-python = ">=3.11"
 # Everything the application needs at runtime. This is the single source of truth:
 # uv.lock pins it exactly, and the container builds from the lock.
@@ -24,9 +24,9 @@ dependencies = [
     "psycopg[binary]>=3.1",
     "pyyaml>=6",
     # agent team and model providers
-    "agno>=1.0",
-    "google-genai>=1.0",      # provider: gemini
-    "anthropic>=0.40",        # provider: claude-api
+    "agno>=3.0",
+    "google-genai>=2.0",      # provider: gemini
+    "anthropic>=1.0",         # provider: claude-api
     "claude-agent-sdk>=0.2",  # provider: claude-code (also needs the local `claude` CLI)
     "packaging>=23.0",
     "python-json-logger>=4.2.0",
@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8.0", "pytest-asyncio>=1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

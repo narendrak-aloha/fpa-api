@@ -21,6 +21,12 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
+.coverage.*
+coverage.xml
+.hypothesis/
+.tox/
+.nox/
+.ipynb_checkpoints/
 
 # Secrets and local environment (API keys, DB passwords)
 .env
@@ -32,9 +38,12 @@ logs/
 *.log
 *.jsonl
 
+# Per-user Claude Code settings (skills/ and .mcp.json stay committed)
+.claude/settings.local.json
+
 # Editor / OS files
 .vscode/
 .idea/
 .DS_Store
-.gitignore
-# /data/*
+Thumbs.db
+*.swp
