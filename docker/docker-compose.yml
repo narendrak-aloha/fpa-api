@@ -129,7 +129,7 @@ services:
       retries: 20
 
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:24.3
     container_name: fpa_clickhouse-1
     environment:
       CLICKHOUSE_PASSWORD: fpa

@@ -41,6 +41,7 @@ PLAN_TABLE = f"{CUBE}.fact_plan_line"
 BASELINE_TABLE = f"{CUBE}.fact_plan_line_baseline"
 STAGED_TABLE = f"{CUBE}.fact_plan_line_staged"
 PREIMAGE_TABLE = f"{CUBE}.fact_plan_line_preimage"
+_RECOMPUTE_TABLES = (BASELINE_TABLE, STAGED_TABLE, PREIMAGE_TABLE)
 
 # The 19-dimension planning grain, in the cube's own column order. Copied from
 # data/seed_fpa.py because the two have to agree exactly or dim_signature_hash
@@ -65,7 +66,6 @@ _SORT_KEY = "plan_version, scenario_id, company, period_month, account, dim_sign
 _lock = threading.Lock()
 _engine: Engine | None = None
 _cube_local = threading.local()
-_cube_ready = False
 
 
 def _plan_line_columns_ddl() -> str:
@@ -134,14 +134,20 @@ def ensure_cube_tables() -> None:
     """Create the three recompute tables if they are not there yet.
 
     They belong to the recompute rather than to the seeder, so the cube can be
-    seeded, dropped and reseeded without knowing the workflow exists. The DDL
-    is ``IF NOT EXISTS`` throughout, which is what lets every activity call
-    this on its way in.
+    seeded, dropped and reseeded without knowing the workflow exists. That is
+    also why this asks ClickHouse on every call instead of remembering it once
+    did the work: a reseed drops the whole database under a worker that keeps
+    running, and a process-wide "done" flag then sends every activity at a
+    table that is gone, retry after retry. The check is one metadata query;
+    the DDL, ``IF NOT EXISTS`` throughout, runs only when something is missing.
     """
-    global _cube_ready
-    if _cube_ready:
-        return
     client = cube()
+    present = client.query(
+        "SELECT count() FROM system.tables WHERE database = {db:String} AND name IN {names:Array(String)}",
+        parameters={"db": CUBE, "names": [table.split(".", 1)[1] for table in _RECOMPUTE_TABLES]},
+    ).result_rows[0][0]
+    if present == len(_RECOMPUTE_TABLES):
+        return
     columns = _plan_line_columns_ddl()
     client.command(
         f"CREATE TABLE IF NOT EXISTS {BASELINE_TABLE} ({columns}) "
@@ -165,13 +171,11 @@ def ensure_cube_tables() -> None:
         f"PARTITION BY toYYYYMM(period_month) "
         f"ORDER BY (plan_version, preimage_for_revision, scenario_id, company, period_month, account, dim_signature_hash)"
     )
-    _cube_ready = True
 
 
 def reset_for_tests() -> None:
     """Drop the cached handles so a test can point the module somewhere else."""
-    global _engine, _cube_ready
+    global _engine
     with _lock:
         _engine = None
         _cube_local.__dict__.clear()
-        _cube_ready = False

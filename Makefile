@@ -14,7 +14,7 @@ API     := curl -sS -H 'content-type: application/json' -H "Authorization: Beare
 .PHONY: help env env-check docker-local-run docker-local-run-d docker-local-stop docker-local-logs docker-seed-db docker-reinit docker-shell \
         docker-make-migrations docker-migrate docker-migrate-down docker-migrate-status \
         worker-logs worker-kill worker-restart plan-state plan-create plan-lock audit-verify audit-tamper audit-untamper bridge \
-        reforecast review approve reject cancel progress \
+        reforecast review approve reject cancel progress reforecast-e2e \
         commitment-fail commitment-ok commitment-ledger replay-record test test-unit
 
 $(ENV_FILE):
@@ -28,7 +28,7 @@ env-check: $(ENV_FILE) ## Show the values compose will actually use (after .env 
 	@$(COMPOSE) config | sed -n '/fpa-dev:/,/volumes:/p' | grep -E '^\s{6}[A-Z_]+:' | sed 's/^ */  /'
 
 help:
-	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-20s %s\n", $$1, $$2}'
+	@grep -E '^[a-z0-9-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-20s %s\n", $$1, $$2}'
 
 # Attached: the first run spends ~12s seeding, which `up -d` made look like a hang.
 # entrypoint.sh owns migrations and seeding; nothing here repeats them.
@@ -159,6 +159,10 @@ approve: ## Approve the parked run as the CFO; run `make review` first (TOKEN=to
 reject: ## Reject the parked run as the CFO
 	@curl -sS -H 'content-type: application/json' -H "Authorization: Bearer $(or $(AS),tok-cfo)" -X POST \
 	  localhost:8000/api/v1/reforecast/$(PLAN)/decision -d '{"approved":false,"comment":"$(or $(NOTE),rejected)"}' | python3 -m json.tool
+
+reforecast-e2e: ## Whole re-forecast with no UI: shock, wait, covenant, CFO approval, then the ledger (FAIL=1, DECISION=reject, DRIVER=, FROM=, TO=)
+	@PLAN=$(PLAN) DRIVER=$(or $(DRIVER),utilisation) FROM=$(or $(FROM),0.75) TO=$(or $(TO),0.70) \
+	  DECISION=$(or $(DECISION),approve) FAIL=$(or $(FAIL),0) scripts/reforecast_e2e.sh
 
 cancel: ## Cancel the running re-forecast
 	@$(API) -X POST localhost:8000/api/v1/reforecast/$(PLAN)/cancel | python3 -m json.tool
