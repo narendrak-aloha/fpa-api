@@ -196,6 +196,21 @@ def test_or_predicate_is_preserved():
     assert "HAVING" in compiled.sql
 
 
+def test_or_between_dimension_filters_is_preserved():
+    # Found in review: dimension filters were joined with AND regardless of
+    # the connector, so "Cloud OR Data" asked for rows that are both.
+    compiled = compile_query(f"SELECT services_revenue WHERE practice = 'Cloud' OR practice = 'Data' {Q2}")
+    assert "(practice = {p0:String} OR practice = {p1:String}) AND period_month" in compiled.sql
+
+
+def test_or_across_a_dimension_and_a_measure_is_refused():
+    with pytest.raises(DSLValidationError, match="OR cannot join a dimension filter and a measure filter"):
+        compile_query(f"SELECT services_revenue WHERE practice = 'Cloud' OR services_revenue > 10 {Q2}")
+    # AND across the two is still fine: WHERE for one, HAVING for the other.
+    compiled = compile_query(f"SELECT services_revenue BY practice WHERE practice = 'Cloud' AND services_revenue > 10 {Q2}")
+    assert "HAVING" in compiled.sql
+
+
 def test_security_scope_is_injected_inside_the_read():
     compiled = compile_query(
         f"SELECT services_revenue BY company {Q2}",
@@ -254,6 +269,28 @@ def test_bridge_compiles_matched_lines_with_both_fx_rates():
     # Only the measure's accounts are matched, and the actual side is vintage-aware.
     assert set(compiled.params.values()) >= {"41000", "41010", "41020", "41400", "PL", "PV-2026-0001", "base"}
     assert "LIMIT 1 BY company, period_month, account, dim_signature_hash" in compiled.sql
+
+
+def test_bridge_eliminates_intercompany_pairs():
+    compiled = compile_query(
+        f"SELECT services_revenue BY practice {Q2} COMPARE PLAN pv='PV-2026-0001' TO ACTUAL BRIDGE"
+    )
+    placeholder = next(f"{{{name}:String}}" for name, value in compiled.params.items() if value == "Yes")
+    assert f"intercompany_flag != {placeholder}" in compiled.sql
+
+
+def test_bridge_keeps_or_between_dimension_filters():
+    compiled = compile_query(
+        f"SELECT services_revenue BY practice WHERE geo_country = 'PL' OR geo_country = 'DE' {Q2} "
+        "COMPARE PLAN pv='PV-2026-0001' TO ACTUAL BRIDGE"
+    )
+    assert re.search(r"\(geo_country = \{p\d+:String\} OR geo_country = \{p\d+:String\}\)", compiled.sql)
+
+
+def test_bridge_refuses_limit():
+    # A bridge over the first N lines still ties, and explains the wrong gap.
+    with pytest.raises(DSLValidationError, match="LIMIT does not apply to BRIDGE"):
+        compile_query(f"SELECT services_revenue {Q2} COMPARE PLAN pv='PV-2026-0001' TO ACTUAL BRIDGE LIMIT 10")
 
 
 def test_bridge_refuses_a_measure_that_is_not_over_accounts():

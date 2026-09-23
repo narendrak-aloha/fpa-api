@@ -141,6 +141,23 @@ class Compiler:
                 raise DSLValidationError(f"invalid measure alias: {measure.alias}")
         if query.bridge and any(isinstance(m.name, (TimeFunction, Aggregate)) for m in query.measures):
             raise DSLValidationError("BRIDGE decomposes plain measures; time functions and aggregates are not bridged")
+        if query.bridge and query.limit is not None:
+            # A bridge over the first N lines ties perfectly and explains the
+            # wrong gap. Only the whole matched set is a bridge.
+            raise DSLValidationError(
+                "LIMIT does not apply to BRIDGE: the bridge has to run over every matched line to explain the gap. "
+                "Narrow it with WHERE or fewer BY levels instead."
+            )
+        if "OR" in query.predicate_connectors and len(
+            {c.field in self.schema.metric_names for c in query.predicates}
+        ) > 1:
+            # Dimension filters are decided per row (WHERE) and measure filters
+            # per group (HAVING); an OR across the two cannot be split between
+            # them without changing its meaning.
+            raise DSLValidationError(
+                "OR cannot join a dimension filter and a measure filter: dimensions are filtered per row and "
+                "measures per group. Use AND between them, or ask two questions."
+            )
 
     def validate_measure(self, measure: Measure, query: Query) -> None:
         name = measure.name
@@ -404,10 +421,7 @@ class Compiler:
     # ------------------------------------------------------------------
     def dimension_predicates(self, query: Query, alias: str | None, period: Period | None, raw: bool = False) -> list[str]:
         """Everything that can be decided per row: dimensions, period, scope, plan."""
-        where: list[str] = []
-        for comparison in query.predicates:
-            if comparison.field in self.schema.dimensions:
-                where.append(self.comparison_sql(comparison, alias))
+        where = self.user_dimension_predicates(query, alias)
         if period:
             where.append(self.period_sql(period, alias, raw=raw))
         where.extend(self.scope_predicates(alias))
@@ -416,6 +430,15 @@ class Compiler:
             where.append(f"{prefix}plan_version = {self.bind(query.plan.version, 'String')}")
             where.append(f"{prefix}scenario_id = {self.bind(query.plan.scenario, 'String')}")
         return where
+
+    def user_dimension_predicates(self, query: Query, alias: str | None) -> list[str]:
+        """The WHERE clause's dimension filters as one predicate, AND/OR kept.
+
+        Validation refuses an OR between a dimension and a measure, so when the
+        two are mixed every connector is AND and the positions still line up.
+        """
+        parts = [self.comparison_sql(c, alias) for c in query.predicates if c.field in self.schema.dimensions]
+        return [self.combine_predicates(parts, query)] if parts else []
 
     def scope_predicates(self, alias: str | None) -> list[str]:
         # Scope is injected from authenticated context, never trusted from
@@ -533,6 +556,13 @@ class Compiler:
         query's job is to fetch exactly the lines it runs over: one row per
         matched (company, month, account, signature), plan quantity and price,
         actual quantity and price, the assumed rate and the real rate.
+
+        Intercompany trade is eliminated: the report is a group view in USD,
+        and a sale from one entity to another is not revenue to the group.
+        Both halves of a pair carry ``intercompany_flag = 'Yes'`` on the same
+        signature (the sale, and its mirrored 51500 cost on the buyer), so
+        dropping the flagged rows drops whole pairs. Nothing is netted in
+        functional currency, so this is not eliminating before translating.
         """
         assert query.plan is not None
         accounts: set[str] = set()
@@ -549,8 +579,9 @@ class Compiler:
         inner = [
             self.period_sql(query.period, None) if query.period else None,
             f"account IN ({account_list})",
+            f"intercompany_flag != {self.bind('Yes', 'String')}",
             *self.scope_predicates(None),
-            *[self.comparison_sql(c, None) for c in query.predicates if c.field in self.schema.dimensions],
+            *self.user_dimension_predicates(query, None),
         ]
         inner = [p for p in inner if p]
         actual = self.actual_source("a", inner, query.as_of)
@@ -578,8 +609,6 @@ class Compiler:
             "WHERE a._is_deleted = 0 "
             f"ORDER BY a.company, a.period_month, a.account, {''.join(f'a.{d}, ' for d in dims)}a.dim_signature_hash"
         )
-        if query.limit is not None:
-            sql += f" LIMIT {query.limit}"
         estimated = self.estimate_rows(query)
         self.enforce_budget(estimated)
         return CompiledQuery(sql, self.params, estimated, query.as_of or "current", bridge=True)
