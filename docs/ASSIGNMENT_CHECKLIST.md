@@ -1,30 +1,183 @@
-# Assignment resumption checklist
+# Assignment checklist
 
-Reviewed against `data/ASSIGNMENT.html` on 2026-09-19. This checklist distinguishes
-implemented behavior from evidence still needed; it is not a claim that the
-whole assignment is complete.
+Reviewed against `data/ASSIGNMENT.html` on **2026-09-22**, by reading the code, the migrations
+and the running stack, not by carrying forward earlier claims. S0–S6 are the assignment's build
+steps; **S7** is "06 · If time remains" and **S8** is "07 · Acceptance"; "08 · Submission" follows.
 
-## Starting point and Claude context
+Legend: `[x]` done · `[~]` partial or not proven · `[ ]` missing.
+Score: done = 1, partial = ½, missing = 0, divided by the number of items.
 
-- [x] Inspect Git status and existing unstaged/untracked implementation before editing.
-- [x] Read the assignment and inspect compiler, bridge, governance, agents, API,
-  workflow activities, recorded histories, migrations, tests, and browser UI.
-- [x] Read Claude session **Temporal implementations completion status**, session
-  `21621c4f-c4ef-4ba7-97b6-cd2b600f2ab9`, in the current project's Claude history.
-- [x] Preserve prior implementation and verify it rather than replacing it.
+## Summary
 
-The current Git worktree is `Downloads/fpa-project-17-09-2026/fpa-project`.
-The separate `company/aloha/fpa-assignment/api` and `ui` directories have no Git
-metadata, so an unstaged diff cannot be established there. This resumption
-changes the current worktree only.
+| Step | Area | Done |
+|---|---|---|
+| S0 | Environment | 83% |
+| S1 | Plan spine | 93% |
+| S2 | FinOpsExpr | 90% |
+| S3 | Variance bridge | 94% |
+| S4 | Durable recompute | 88% |
+| S5 | Agents | 81% |
+| S6 | Interface | 100% |
+| S7 | If time remains (optional) | 7% |
+| S8 | Acceptance runs | 83% |
+| 08 | Submission | ~60% |
 
-Claude's earlier live tests reported worker restart, approval/rejection,
-idempotence, cancellation, and compensation checks. Its final work added
-migration 012, cumulative driver shocks and commitment supersession, then stopped
-at its session limit before producing the handoff/final suite result. Those
-historical claims are context, not new verification in this session.
+Test suite on the live stack: **344 collected, 3 failed**, all integration tests, none a missing
+feature (see S2 and S3).
 
-## Fixes implemented during this resumption
+## S0 — Environment (83%)
+
+- [x] ClickHouse, Postgres and Temporal (UI on :8233) run in Docker, with the app, recompute worker and Commitment Service.
+- [x] Cube seeded: `fact_gl_actual` holds 1,030,443 rows.
+- [~] Committed, and `docker compose up` brings the stack up. A clean-machine install has never been run (`scripts/acceptance_stack.py` exists for it).
+
+## S1 — Plan spine (93%)
+
+- [x] `planning_model`: dimension registry, measure registry with aggregation type, `calc_order_dag`.
+- [x] `plan_driver` is effective-dated (`effective_from` / `effective_to`, range check).
+- [x] `plan_version` state machine; `plan_version_line` carries `driver_derivation_trace`.
+- [x] Scenarios are branches: `scenario_set` + `scenario_driver_override`, no duplicated rows.
+- [x] `plan_fx_rate` is separate from the real rate.
+- [x] `variance_report` guarded: only a human controller/CFO closes it (trigger).
+- [x] `audit_event` append-only and hash-chained by trigger; `make audit-tamper` then `make audit-verify` fails.
+- [x] No self-approval: database check constraint plus application check.
+- [x] Covenant gate: `state NOT IN ('APPROVED','LOCKED') OR covenant_ok` in the database.
+- [x] Only a LOCKED version publishes (`verify_publishable`).
+- [x] Empty derivation trace rejected; `amount = round(quantity × unit_price, 2)` enforced.
+- [x] Transitions are data (`plan_state_transition`).
+- [x] Covenant and FX fields writable only by a controller, enforced by trigger on `fpa.actor`.
+- [x] Concurrent edits: `row_version` trigger plus `expected_version` on transition, covenant and FX writes.
+- [x] Author, review, approve (second user) and lock through the UI.
+- [x] README explains database versus application placement.
+- [~] **Locked is not fully locked.** `plan_version_lock_guard` / `plan_line_lock_guard` fire on `UPDATE OR DELETE` only: an `INSERT` of a new line into a LOCKED version succeeds from psql (verified 2026-09-22 in a rolled-back transaction).
+- [~] **LOCKED can never become SUPERSEDED**: no transition row, and the lock trigger would refuse it. The successor chain (`supersedes_plan_version_id`, `superseded_by`) is navigable.
+- [~] **`llm_disclosure_log` is not append-only in the database.** No trigger; the `REVOKE` in `db/runtime_roles.sql` is not applied because the stack connects as `postgres`, so an `UPDATE` succeeded (verified, rolled back).
+
+## S2 — FinOpsExpr (90%)
+
+- [x] Both entry rules (`expr`, `query`) parse to an AST; no `eval` / `exec` / `compile` in the path.
+- [x] Time, dimension and math functions: PRIOR, LEAD, YOY, CAGR, YTD, QTD, MTD, ROLLING, SUM, AVG, MIN, MAX, ABS, ROUND.
+- [x] Compiles to parameterised SQL; names resolve against the registry; unknown names are errors.
+- [x] Measure types enforced; `SUM(utilisation)` is a type error that explains itself.
+- [x] Caller's row scope injected by the compiler; a cost budget refuses large queries.
+- [x] Driver save parses the formula; names must be in `calc_order_dag`; planning-model cycles rejected; PRIOR/LEAD self-reference is not a cycle.
+- [x] Grammar tests: precedence, nesting, time operators, measure types, failures.
+- [x] AS OF resolves against `dim_ledger_vintage`.
+- [~] **Partition-pruning test fails, pruning works.** `EXPLAIN indexes=1` shows MinMax reading 6/31 parts; `tests/test_cube_integration.py::test_period_predicate_prunes_partitions` looks for the label `Min-Max`, and ClickHouse 24.3 prints `MinMax`. Test bug.
+- [~] **AS OF magnitude test fails.** July and August Poland Q2 delivery cost differ, but by 6.4% (60.67M → 64.58M), while the test expects 10–25% and the assignment says about 18%. Needs investigation.
+
+## S3 — Variance bridge (94%)
+
+- [x] Revenue legs: price, volume, nested mix (practice, then grade within practice), FX. Cost legs: rate, efficiency.
+- [x] Ties at every node to `max(1.00, 0.01 × line_count)`.
+- [x] Volume + mix = quantity variance (tested).
+- [x] Convention declared and tested; `Convention.PRICE_FIRST` shows the other order also ties.
+- [x] Property test over seeded random plan/actual pairs, at every level, both conventions.
+- [x] Reports persist with cited lines and a named vintage; material gaps escalate; only a human closes.
+- [~] **`test_every_leg_is_exercised_on_the_poland_cut` fails on the local cube**: FX is −105,684.91 against a −376,011.42 gap, and the test expects FX under 1% of the gap. The local cube now holds a published re-forecast (revision 2 of `PV-2026-0001`, 55,782 lines), which moves the plan side. Reseed and rerun to confirm.
+
+## S4 — Durable recompute (88%)
+
+- [x] Deterministic workflow; replay test in CI (`.github/workflows/tests.yml`) against four committed histories.
+- [x] Phases: snapshot → dirty set → child-workflow fan-out → save draft → approval → publish → commit → variance.
+- [x] Long activity heartbeats and resumes; large runs continue-as-new; retry policies per kind of work.
+- [x] Idempotency keys from stable inputs; the same shock twice changes nothing (observed 2026-09-22).
+- [x] Second shock mid-run: update handler with validator (fold in while computing, refuse once parked).
+- [x] Cancel signal, progress query, approval timer (expires as rejected).
+- [x] Approval and rejection with segregation of duties, verified live 2026-09-22.
+- [x] Commitment Service: idempotency key, DELETE compensation, runtime failure rate (`make commitment-fail`).
+- [x] Compensation after a failed commitment push.
+- [~] Worker kill mid-run and while parked: not re-verified since recent changes.
+- [~] Commitment Service at 100% failure: not re-verified live.
+- [~] Cumulative shocks (A then B) not run live across the three services.
+- [~] **Failure cleanup is all-or-nothing.** In `_fail()` (`recompute/workflows.py`), one `try` covers discard, successor rejection and the FAILED mirror, so a failed first step skips the rest. Observed 2026-09-22: run `01a0c922…` stayed `RUNNING` and `PV-TEST-1-R2` stayed `DRAFT`.
+
+Fixed 2026-09-22 (not yet committed): `ensure_cube_tables()` cached "done" for the life of the worker, so
+a cube reseed under a running worker left `fact_plan_line_baseline` / `_staged` / `_preimage` missing and
+every retry failed. It now checks `system.tables` on each call and recreates what is missing.
+
+## S5 — Agents (81%)
+
+- [x] Agno Team with a leader, `coordinate` mode, defended in the README.
+- [x] Stable member ids; `tool_call_limit`; typed `output_schema`; one bounded repair.
+- [x] Tools are `list_metrics`, `list_dimensions`, `run_finops_query`, `propose_driver`; no `run_sql`.
+- [x] Guardrail classes as pre-hooks: `PIIDetectionGuardrail`, `InjectionGuardrail`.
+- [x] Arithmetic post-hook fails the run on an invented number.
+- [x] Masking and disclosure as tool hooks plus a model-egress wrapper; the log row is written before the send, never the payload (34 rows so far).
+- [x] Scope via run `dependencies`, resolved from the token; a member without it is refused.
+- [x] HITL: `propose_driver` pauses (`requires_confirmation`), persisted in `agent_proposal`, decided by a second human, run continued.
+- [x] Vintage reconciliation raises drift flags into the audit log (`/api/v1/reconcile`).
+- [x] Temporal / Agno / Postgres boundaries written up (`docs/RECOMPUTE.md`).
+- [~] Disclosure log immutability not enforced in the database (see S1).
+- [~] Live adversarial run partial: injection, scope widening and "I am the CFO" run live on 2026-09-19; classification failure and a directly invoked member covered by unit tests only.
+- [ ] **Team cost against a single agent** (tokens, latency): not measured.
+- [ ] **Member trace**: nothing records which member produced the DSL — not in the API response, the UI or the audit log.
+
+## S6 — Interface (100%)
+
+- [x] DSL, SQL and parameters shown next to the answer.
+- [x] Bridge waterfall with labelled legs and the unrounded residual.
+- [x] Drill-through to cube rows with the vintage.
+- [x] Live workflow progress from the Temporal progress query (`RunTracker`: phases, refusals, outcome).
+- [x] Approve / reject / lock through the same API rules; buttons are role-aware with the reason on hover.
+
+The role-aware buttons and `RunTracker` (2026-09-22) are not yet committed in `fpa-ui`.
+
+## S7 — If time remains (7%)
+
+- [~] Bridge across vintages: `POST /api/v1/bridge/vintages` and unit tests; not run live on Poland Q2, not in the UI.
+- [ ] Consolidation (intercompany elimination, translation adjustment).
+- [ ] Agno eval suite in CI with a JSON report.
+- [ ] Scenario compare screen.
+- [ ] Rolling forecast tick with back-test.
+- [ ] Pre-aggregations or semantic layer with latency numbers.
+- [ ] ClickHouse row policies beneath the compiler.
+
+## S8 — Acceptance runs (83%)
+
+| # | What will be run | Status |
+|---|---|---|
+| 1 | Bring up and seed from the README on a clean machine | `[~]` never tried |
+| 2 | Approve a version as its own author → refused | `[x]` |
+| 3 | Approve as a second user, lock, edit → refused, also from psql | `[~]` UPDATE refused; INSERT of a line succeeds |
+| 4 | Alter an audit row → verifier fails | `[x]` `make audit-tamper` |
+| 5 | Malformed formula / cyclic model → specific error | `[x]` |
+| 6 | `SUM(utilisation)` → type error | `[x]` |
+| 7 | "Why did Poland miss in Q2 2026?" → DSL and member trace | `[~]` DSL yes, member trace no |
+| 8 | Same question AS OF the July close → different, correct answer | `[~]` different; magnitude test fails |
+| 9 | Disclosure log shows nothing personal left | `[x]` |
+| 10 | Talk it into a fourth entity / obeying a customer name → fails | `[x]` live 2026-09-19 |
+| 11 | Shock, kill the worker mid-run → finishes | `[x]` built; not re-verified |
+| 12 | Park, kill while parked, approve → resumes | `[x]` built; not re-verified |
+| 13 | Same recompute again → no cube change | `[x]` |
+| 14 | Commitment Service at 100% → nothing half-applied | `[~]` not re-verified live |
+| 15 | Bridge residual ties one level down | `[x]` |
+
+## 08 — Submission (~60%)
+
+- [x] README: how to run, architecture, arguable decisions, two more weeks.
+- [~] README "Not finished" is out of date (says integration suites have not been re-run).
+- [~] Uncommitted: `src/fpa_project/recompute/stores.py`; the UI work in `fpa-ui`.
+- [ ] Video (10–15 min): README still says "link goes here".
+
+## Next, in order of impact
+
+1. Record the video.
+2. Close the two database gaps: add `INSERT` to the lock guard on `plan_version_line`; add an append-only trigger on `llm_disclosure_log` (S1, S8 #3 and #9).
+3. Add member attribution to the query response and UI (S5, S8 #7).
+4. Measure team cost against a single agent; put the numbers in the README.
+5. Fix the pruning test's label; reseed the cube; rerun the AS OF and Poland-legs tests.
+6. Make each `_fail()` cleanup step independent; re-verify worker kill and 100% commitment failure live.
+7. Commit both repos; update the README's "Not finished".
+
+---
+
+# History
+
+Earlier review notes, kept because they record what was verified live and which bugs were found
+that way. The open items they list are superseded by the checklist above.
+
+## Fixes during the 2026-09-19 resumption
 
 - [x] **Covenant bypass:** `governance.transition` no longer sets `covenant_ok=true`
   while approving. The existing database constraint now consumes the stored
@@ -48,103 +201,7 @@ historical claims are context, not new verification in this session.
 - [x] Update README, Makefile and recompute instructions for explicit covenant
   review and the actual `AS=tok-cfo` approval option.
 
-## Acceptance checklist and remaining work
-
-### S0 — Environment
-
-- [x] Compose services, database migrations, seed configuration and lockfile exist.
-- [x] Existing local Postgres is at migration 012; existing ClickHouse answers the
-  compiler/bridge integration suite.
-- [ ] Reproduce installation, image build, migrations and seed on completely fresh
-  volumes. Existing local services are not evidence of a clean-machine install.
-
-### S1 — Plan spine
-
-- [x] Plan authoring and declared role-based transitions; self-approval refusal;
-  database lock and derivation constraints; covenant gate and controller fields.
-- [x] Audit hash-chain verifier, append-only checks, row-version conflict detection,
-  driver formula/cycle validation and scenario overrides are implemented/tested.
-- [ ] Review authorization across all plan/workflow/audit endpoints. Query scope
-  and stored-report scope are enforced; whole-plan workflow operations currently
-  rely mainly on roles rather than company-level ownership.
-- [ ] Strengthen optimistic concurrency for covenant/rate/driver writes, which do
-  not all accept an expected row version. State transitions do.
-- [ ] Define least-privilege database roles for deployment: local demonstration
-  connections use administrative credentials and `fpa.actor` is an application
-  assertion, not a secure identity boundary against an arbitrary superuser.
-
-### S2 — FinOpsExpr
-
-- [x] Parser/grammar, registry/type checks, cycle checks, scope, query budget,
-  vintage resolution and time-series compiler tests pass.
-- [x] Live ClickHouse tests verify vintage differences, time functions and partition
-  pruning rather than SQL text alone.
-- [ ] Complete an explicit acceptance matrix for every documented expression
-  function, aggregation type and unsupported combination; reject unsupported
-  semantics with named errors. A passing current suite is not exhaustive coverage.
-
-### S3 — Variance bridge
-
-- [x] Nested rollup decomposition, interaction conventions, cost/margin legs,
-  property checks, materiality escalation and human-only closing are implemented.
-- [x] Live Poland Q2 bridge, July/August vintage differences, persisted citations
-  and scope behavior pass integration tests.
-- [x] Browser exposes the waterfall, per-node residual and source citation rows.
-- [ ] Consider a paginated full-row drill-through: persisted citations currently
-  expose keys, amounts, path and vintage, not every original ledger column.
-
-### S4 — Durable recompute
-
-- [x] Child workflows, checkpointing, stable write keys, approval signals/timer,
-  refusal handling, cancellation, progress, compensation and recorded replay exist.
-- [x] All 22 workflow behavior tests and four recorded-history replays pass.
-- [x] Claude's cumulative-shock/commitment-supersession implementation is present;
-  engine/workflow tests pass. Preserve this work when continuing.
-- [ ] Run the new cumulative path across the real three services: approve shock A,
-  then B; compare complete cube totals and active commitment totals; repeat B;
-  fail the next commitment push and verify restoration of the preceding revision.
-- [ ] Verify scenario-subset behavior when superseding prior commitments: a run
-  limited to one scenario must not release reservations for other scenarios.
-- [ ] Verify commitment amounts' currency semantics: the current activity groups
-  functional amounts by scenario/category across entities without a currency axis.
-- [ ] Force continue-as-new and verify a real worker restart mid-compute and while
-  awaiting approval on the final code. Claude did not trigger continue-as-new.
-- [ ] Exercise 100% service failure, response-loss-after-write, and recovery during
-  compensation after these changes. Local workflow fakes are not this evidence.
-
-### S5 — Agents (largest remaining implementation area)
-
-- [x] Agno Team, typed DSL output, compiler-only analytical tools, per-request scoped
-  toolset, bounded repair, stable IDs and final arithmetic checking exist.
-- [ ] Implement Agno `BaseGuardrail` PII/injection pre-hooks on leader and members.
-  Current masking/helpers and prompt instructions do not satisfy this requirement.
-- [ ] Implement structural tool hooks for classification/masking and write durable
-  disclosure metadata before every model send; current disclosure list is in memory.
-  Include scope, classes, methods and payload hash, never the payload itself.
-- [ ] Resolve and verify authenticated scope through runtime dependencies for every
-  member invocation, including direct calls. A scoped tool closure is not the
-  complete framework-level requirement.
-- [ ] Attach arithmetic verification as an Agno post-hook and extend adversarial
-  number-format coverage. Final orchestration currently checks narration separately.
-- [ ] Replace in-memory driver proposals with persisted DRAFTs correlated to Agno
-  HITL confirmation, a second-human approval record and durable run continuation.
-- [ ] Implement vintage reconciliation/drift flags that the agent cannot suppress.
-- [ ] Measure token cost and latency against a single-agent baseline; document why
-  coordinate mode is worth the extra calls.
-- [ ] Run live NL/adversarial cases: unseen finance question, hostile customer text,
-  scope widening, classification failure and invented numeric narration.
-
-### S6 — Interface and submission
-
-- [x] Required UI controls now call the existing authenticated backend.
-- [ ] Demonstrate live progress, worker interruption and approval with real Temporal
-  from the browser; final-code browser coverage is recorded below.
-- [ ] Add the requested 10–15 minute demonstration video and link at README top.
-- [ ] Finish architecture/tradeoff notes and two-week follow-up plan after S5 work.
-- [ ] Review/stage/commit intended source and history files. Prior work remains
-  unstaged/untracked; no commits were created during this resumption.
-
-## Validation evidence
+## Validation evidence, 2026-09-19
 
 - Full suite with existing local Postgres and ClickHouse: **296 passed** in 15.24s,
   one Starlette/AnyIO deprecation warning. Includes governance, bridge, cube,
@@ -187,20 +244,6 @@ Fixes made in this review:
 - [x] `GET /api/v1/agent-proposals/{id}` returned 500 for an unknown id; now 404.
 
 Evidence: `pytest` without the stack: **267 passed, 5 integration modules skipped** (stack was down; Claude's session has no docker-group access). Replay of the four committed histories passes.
-
-### Still pending (in priority order)
-
-1. ~~**Start the stack and run the integration suites**~~ — done 2026-09-20 against the live stack:
-   **321 passed** (bridge, cube, governance, commitment, agent, reconciliation) plus **23** workflow behaviour
-   tests and the four recorded replays. `alembic check`: no new upgrade operations. Two failures found and
-   fixed on the way, both below: the citation drill-through 500, and a bridge test asserting a material FX leg.
-2. **Live S4 cumulative path** across the real services: approve shock A, then B; cube totals and active commitments must reflect A+B; repeat B → `ALREADY_PUBLISHED`; fail the next commitment and verify the prior revision is restored and its commitments stay reserved.
-3. ~~Commitment semantics~~ — resolved on analysis, no change needed: `commit_to_treasury` reserves the *complete* current plan across all scenarios (so superseding every older revision cannot unfund a scenario the run did not touch), and translates each functional amount to USD at the plan rate before summing, failing closed on a missing or duplicate rate.
-4. **Live agent adversarial run** with a real provider: unseen finance question, hostile customer name, scope widening (also against a member invoked directly), classification failure, invented number; then confirm `llm_disclosure_log` rows.
-5. **Coordinate vs single-agent cost**: token and latency numbers from `RunOutput.metrics`, written into the README.
-6. **Fresh-machine acceptance** via `scripts/acceptance_stack.py`, following the README only.
-7. ~~README~~ — written: architecture, the arguable decisions (database vs application table, Temporal vs Agno, bridge convention, HTTP surface, team mode), not finished, two more weeks. Still missing: the **video link** and the **team cost numbers** (item 5).
-8. **Commit**: nothing is committed yet; review and commit source, migrations and `tests/histories/`.
 
 ## Cross-vintage bridge (optional item), analysis first
 
