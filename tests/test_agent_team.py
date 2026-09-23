@@ -196,6 +196,43 @@ def test_orchestrator_can_consume_agno_like_team_output():
     assert response.execution_status == "SUCCESS"
 
 
+def test_the_response_names_the_member_that_produced_the_dsl():
+    # Acceptance: "read the DSL it produced and the trace of which member
+    # produced it". Built from Agno's own member_responses, not model text.
+    from types import SimpleNamespace as NS
+
+    dsl = "SELECT services_revenue BY practice"
+    query_member = NS(agent_id="fpa-query", agent_name="QueryAgent", content={"dsl": dsl},
+                      tools=[NS(tool_name="list_metrics", tool_args={}), NS(tool_name="run_finops_query", tool_args={"dsl": dsl})])
+    variance_member = NS(agent_id="fpa-variance", agent_name="VarianceAgent", content="looks fine", tools=[])
+
+    class FakeTeam:
+        def run(self, prompt, **kwargs):
+            return NS(team_id="fpa-team", team_name="FPATeam", content={"dsl": dsl, "explanation": ""},
+                      member_responses=[query_member, variance_member], tools=[])
+
+    tools = FPATools(UserScope(user_id="u1", allowed_companies=frozenset({"C001"}), max_estimated_rows=2_000_000), executor=lambda sql, params: [{"value": 1}])
+    response = FPAOrchestrator(tools).run_with_team(FakeTeam(), PlanningRequest(request="revenue by practice"))
+    assert response.execution_status == "SUCCESS"
+    assert response.produced_by == "fpa-query"
+    assert response.member_trace["leader"]["id"] == "fpa-team"
+    assert [m["id"] for m in response.member_trace["members"]] == ["fpa-query", "fpa-variance"]
+    assert response.member_trace["members"][0]["tools"] == ["list_metrics", "run_finops_query"]
+
+
+def test_the_leader_is_named_when_no_member_carried_the_dsl():
+    from types import SimpleNamespace as NS
+
+    class FakeTeam:
+        def run(self, prompt, **kwargs):
+            return NS(team_id="fpa-team", team_name="FPATeam", content={"dsl": "SELECT services_revenue", "explanation": ""},
+                      member_responses=[], tools=[])
+
+    tools = FPATools(UserScope(user_id="u1", allowed_companies=frozenset({"C001"}), max_estimated_rows=2_000_000), executor=lambda sql, params: [{"value": 1}])
+    response = FPAOrchestrator(tools).run_with_team(FakeTeam(), PlanningRequest(request="revenue"))
+    assert response.produced_by == "fpa-team"
+
+
 def test_major_pipeline_steps_are_logged_to_terminal(capsys):
     tools = FPATools(
         UserScope(user_id="u1", allowed_companies=frozenset({"C001"}), max_estimated_rows=2_000_000),

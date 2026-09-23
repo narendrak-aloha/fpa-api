@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import ValidationError
 
 from fpa_project.dsl.parser import parse_query
@@ -14,6 +16,49 @@ from .registry import PlanningRegistry
 from .tools import FPATools
 from .api_keys import APIKeyRotator
 import uuid
+
+
+def _dsl_of(content: object) -> str:
+    if isinstance(content, AgentPlan):
+        return content.dsl
+    if isinstance(content, dict):
+        return str(content.get("dsl") or "")
+    return str(getattr(content, "dsl", "") or "")
+
+
+def _same_dsl(left: str, right: str) -> bool:
+    return bool(left) and " ".join(left.split()) == " ".join(right.split())
+
+
+def member_trace(run_output: object, dsl: str) -> dict[str, Any]:
+    """Who in the team did what, and which of them produced the executed DSL.
+
+    Read from Agno's own run record rather than from the model's say-so: a
+    team run lists each member's response under ``member_responses`` with its
+    stable ``agent_id``, the tools it called and what it returned. The
+    producer is the last member whose plan or ``run_finops_query`` call
+    carried exactly this DSL; if none did, the leader wrote it itself.
+    """
+    def entry(run: object) -> dict[str, Any]:
+        tools = list(getattr(run, "tools", None) or [])
+        return {
+            "id": getattr(run, "agent_id", None) or getattr(run, "team_id", None),
+            "name": getattr(run, "agent_name", None) or getattr(run, "team_name", None),
+            "tools": [getattr(t, "tool_name", None) for t in tools],
+            "_dsls": [_dsl_of(getattr(run, "content", None))]
+            + [str((getattr(t, "tool_args", None) or {}).get("dsl", "")) for t in tools
+               if getattr(t, "tool_name", None) == "run_finops_query"],
+        }
+
+    leader = entry(run_output)
+    members = [entry(run) for run in getattr(run_output, "member_responses", None) or []]
+    producer = next((m for m in reversed(members) if any(_same_dsl(d, dsl) for d in m["_dsls"])), leader)
+    strip = lambda e: {k: v for k, v in e.items() if k != "_dsls"}  # noqa: E731
+    return {
+        "leader": strip(leader),
+        "members": [strip(m) for m in members],
+        "produced_by": {"id": producer["id"], "name": producer["name"]},
+    }
 
 
 def _check_error(run_output: object) -> tuple[str, str] | None:
@@ -221,6 +266,9 @@ class FPAOrchestrator:
                 last_result = AgentFPAResponse(user_query=prepared.request, execution_status="VALIDATION_ERROR", error_message=correction)
                 continue
             result = self.finalize(request, candidate, narrative)
+            trace = member_trace(raw, result.generated_dsl or _dsl_of(candidate))
+            self.audit_logger.record("agno", "member_trace", trace, run_id=run_id)
+            result = result.model_copy(update={"produced_by": trace["produced_by"]["id"], "member_trace": trace})
             if result.execution_status in {"SUCCESS", "REJECTED_SCOPE", "OUT_OF_SCOPE", "DRAFT"}:
                 return result
             last_result = result

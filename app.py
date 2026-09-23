@@ -612,13 +612,37 @@ async def cancel_reforecast(plan_version_code: str, who: Principal = Depends(glo
 
 @app.get("/api/v1/reforecast/{plan_version_code}/progress")
 async def reforecast_progress(plan_version_code: str, who: Principal = Depends(global_plan_user)) -> dict[str, Any]:
-    """The live phase and counters, straight from the running workflow."""
+    """The live phase and counters, straight from the running workflow.
+
+    A successor (PV-…-R2) has no run of its own: it is drafted by the run on
+    the version it supersedes. Asked for a successor, this answers with that
+    run, but only when the run's target really is this successor, and says
+    which plan the run is keyed on so decisions and cancels go there.
+    """
+    from sqlalchemy import text as sql_text
+
+    from fpa_project.governance import engine
     from fpa_project.recompute import client as recompute_client
 
+    run_code = plan_version_code
     result = await recompute_client.progress(plan_version_code)
     if result is None:
+        with engine().begin() as conn:
+            predecessor = conn.execute(
+                sql_text(
+                    "SELECT p.plan_version_code FROM fpa_governance.plan_version v "
+                    "JOIN fpa_governance.plan_version p ON p.plan_version_id = v.supersedes_plan_version_id "
+                    "WHERE v.plan_version_code = :code"
+                ),
+                {"code": plan_version_code},
+            ).scalar()
+        if predecessor:
+            candidate = await recompute_client.progress(predecessor)
+            if candidate and candidate.get("target_version_code") == plan_version_code:
+                result, run_code = candidate, predecessor
+    if result is None:
         raise HTTPException(status_code=404, detail=f"no re-forecast running for {plan_version_code}")
-    return result
+    return {**result, "run_plan_version_code": run_code}
 
 
 @app.get("/api/v1/reforecast/{plan_version_code}/runs")

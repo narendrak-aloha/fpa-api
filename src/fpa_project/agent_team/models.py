@@ -82,6 +82,10 @@ class AgentFPAResponse(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     cited_data_rows: list[dict[str, Any]] = Field(default_factory=list)
     error_message: str | None = None
+    # The team member (stable Agno id) whose output carried the executed DSL,
+    # and the leader/member delegation it came out of. Set on team runs only.
+    produced_by: str | None = None
+    member_trace: dict[str, Any] | None = None
 
 
 class ToolError(BaseModel):
