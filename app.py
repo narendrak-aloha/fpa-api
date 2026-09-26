@@ -554,6 +554,10 @@ class ShockRequest(BaseModel):
     from_value: float = Field(gt=0, description="the driver's value before the change")
     to_value: float = Field(gt=0)
     scenario_codes: list[str] | None = None
+    # Why the planner is making this move. Recorded in the audit log beside the
+    # run, never in the workflow input: it is not part of what is computed, so
+    # it must not change the idempotency key or the recorded histories.
+    reason: str = Field(default="", max_length=2_000)
 
 
 class DecisionRequest(BaseModel):
@@ -577,7 +581,7 @@ async def start_reforecast(req: ShockRequest, who: Principal = Depends(global_pl
         raise HTTPException(status_code=403, detail=f"{who.user_id} may not start a re-forecast; that needs the planner, controller or cfo role")
     shock = DriverShock(driver_code=req.driver_code, from_value=req.from_value, to_value=req.to_value)
     try:
-        return await recompute_client.start(req.plan_version_code, [shock], who.user_id, req.scenario_codes)
+        started = await recompute_client.start(req.plan_version_code, [shock], who.user_id, req.scenario_codes)
     except Exception as exc:
         # A refused update arrives as WorkflowUpdateFailedError("Workflow update
         # failed"), with the validator's actual reason on .cause. The caller
@@ -586,6 +590,30 @@ async def start_reforecast(req: ShockRequest, who: Principal = Depends(global_pl
         reason = getattr(getattr(exc, "cause", None), "message", None) or str(exc)
         log.warning("re-forecast start failed: %s", reason)
         raise HTTPException(status_code=409, detail=reason) from exc
+    if req.reason.strip():
+        _record_reason(req, who, started)
+    return started
+
+
+def _record_reason(req: ShockRequest, who: Principal, started: dict[str, Any]) -> None:
+    """Keep the planner's rationale where the approver will see it.
+
+    Written only once the run has accepted the shock, so a refused shock leaves
+    no reason behind. A failure here does not undo a run that has started; it
+    is logged, because the run itself is the thing that matters.
+    """
+    from fpa_project.governance import engine, record
+
+    try:
+        with engine().begin() as conn:
+            record(conn, who.user_id, "reforecast", req.plan_version_code, "REASON", {
+                "reason": req.reason.strip(),
+                "shocks": [[req.driver_code, req.from_value, req.to_value]],
+                "action": started.get("action"),
+                "run_id": started.get("run_id"),
+            })
+    except Exception:  # noqa: BLE001 - the run has started; do not report it as failed
+        log.exception("could not record the re-forecast reason for %s", req.plan_version_code)
 
 
 @app.post("/api/v1/reforecast/{plan_version_code}/decision")
@@ -643,6 +671,23 @@ async def reforecast_progress(plan_version_code: str, who: Principal = Depends(g
     if result is None:
         raise HTTPException(status_code=404, detail=f"no re-forecast running for {plan_version_code}")
     return {**result, "run_plan_version_code": run_code}
+
+
+@app.get("/api/v1/plan-versions/{plan_version_code}/impact")
+def plan_version_impact(
+    plan_version_code: str, scenario: str = "base", who: Principal = Depends(global_plan_user),
+) -> dict[str, Any]:
+    """What a re-forecast successor does to the plan: shocks, reasons and the bridge.
+
+    Read-only, and behind the same dependency as every other plan read, so it
+    shows an approver nothing they could not already load.
+    """
+    from fpa_project.reforecast_impact import reforecast_impact
+
+    try:
+        return reforecast_impact(plan_version_code, scenario)
+    except Refused as exc:
+        raise _refusal(exc) from exc
 
 
 @app.get("/api/v1/reforecast/{plan_version_code}/runs")

@@ -250,8 +250,11 @@ def list_plan_versions() -> list[dict[str, Any]]:
     with engine().begin() as conn:
         rows = conn.execute(
             text(
-                "SELECT plan_version_code, state, requested_by, approved_by, covenant_ok, revision, row_version, created_at "
-                f"FROM {SCHEMA}.plan_version ORDER BY created_at"
+                "SELECT v.plan_version_code, v.state, v.requested_by, v.approved_by, v.covenant_ok, v.revision, "
+                "       v.row_version, v.created_at, v.updated_at, s.plan_version_code AS supersedes_plan_version_code "
+                f"FROM {SCHEMA}.plan_version v "
+                f"LEFT JOIN {SCHEMA}.plan_version s ON s.plan_version_id = v.supersedes_plan_version_id "
+                "ORDER BY v.created_at"
             )
         ).mappings().all()
     return [dict(r) for r in rows]

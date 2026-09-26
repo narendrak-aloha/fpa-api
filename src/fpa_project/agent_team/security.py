@@ -69,6 +69,15 @@ def persist_disclosure(event):
         ), event)
 
 
+# Agno's own team tools. A delegation returns the member's run as an event
+# stream, not data, so there is nothing here to classify: the member run has
+# its own pre-hooks, tool hooks and egress-gated model, and what it returns
+# reaches the leader's model only through gate_messages, which masks and logs
+# it before the send. Masking the stream itself fails closed on the generator
+# and silently blocked every delegation.
+DELEGATION_TOOLS = frozenset({"delegate_task_to_member", "delegate_task_to_members"})
+
+
 class AgentBoundary:
     def __init__(self, tools, writer=persist_disclosure):
         self.tools = tools
@@ -119,6 +128,8 @@ class AgentBoundary:
         # A dependency may narrow scope, but must not leave a wider tool closure.
         if scope != self.tools.scope:
             raise InputCheckError("build a new toolset for a narrowed dependency scope")
+        if function_name in DELEGATION_TOOLS:
+            return function_call(**arguments)
         try:
             result = function_call(**arguments)
             safe = self.sanitize(result)

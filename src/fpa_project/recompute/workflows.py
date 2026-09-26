@@ -291,19 +291,29 @@ class PlanRecomputeWorkflow:
         )
         self._phase = "FAILED"
         once = RetryPolicy(maximum_attempts=3)
-        try:
-            if self._context is not None and self._revision:
+        # Each step is tried on its own: one that cannot be done must not stop
+        # the others. A single try around all three once left a run mirrored as
+        # RUNNING and its successor at DRAFT because the discard had failed.
+        # The order and the commands are unchanged, so recorded histories replay.
+        if self._context is not None and self._revision:
+            try:
                 await workflow.execute_activity(
                     discard_staged, args=[self._context.plan_version_code, self._revision],
                     start_to_close_timeout=MEDIUM, retry_policy=once,
                 )
-            if closes_successor and self._target_version_id:
+            except FailureError as cleanup_failure:
+                workflow.logger.warning("could not discard the staged rows: %s", cleanup_failure)
+        if closes_successor and self._target_version_id:
+            try:
                 await workflow.execute_activity(
                     record_rejection,
                     args=[self._target_version_id, "", f"run failed: {detail}"[:500],
                           workflow.info().workflow_id, False],
                     start_to_close_timeout=SHORT, retry_policy=once,
                 )
+            except FailureError as cleanup_failure:
+                workflow.logger.warning("could not close the successor: %s", cleanup_failure)
+        try:
             await self._mirror("FAILED", ended=True, detail=detail[:500])
         except FailureError as cleanup_failure:
             workflow.logger.warning("could not record the failure: %s", cleanup_failure)

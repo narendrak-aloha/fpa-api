@@ -22,7 +22,7 @@ SELECT services_revenue BY practice FOR PERIOD 2026-Q2 COMPARE PLAN pv='PV-2026-
 SELECT YOY(services_revenue) BY practice FOR PERIOD 2026-Q2"""
 
 
-def build_agno_team(model=None, toolset=None, *, disclosure_writer=None):
+def build_agno_team(model=None, toolset=None, *, disclosure_writer=None, single=False):
     # Agno is optional. Keep model construction in this adapter so the core
     # planner remains usable offline and tests can inject deterministic plans.
     """Build the NL interpreter/DSL critic/formatter team.
@@ -66,6 +66,11 @@ def build_agno_team(model=None, toolset=None, *, disclosure_writer=None):
     proposal_tool = Function.from_callable(toolset.propose_driver)
     proposal_tool.requires_confirmation = True
     tool_functions = [toolset.list_metrics, toolset.list_dimensions, toolset.run_finops_query, proposal_tool]
+    if single:
+        # One agent with the team's guardrails, hooks, tools and instructions:
+        # the baseline the team's token and latency cost is measured against
+        # (scripts/measure_team_cost.py). The API always builds the team.
+        return Agent(**controls, id="fpa-single", tool_call_limit=6, name="SingleAgent", model=model, tools=tool_functions, output_schema=AgentPlan, instructions=[common, "Translate analytical intent into a minimal query DSL plan and return an AgentPlan. It must have a non-empty dsl field, proposed_driver=true after a proposal, or out_of_scope=true with an empty dsl when the question is not about the FP&A cube. Execution and the final AgentFPAResponse are handled by the orchestrator."])
     interpreter = Agent(**controls, id="fpa-query", tool_call_limit=6, name="QueryAgent", model=model, instructions=[common, "Translate analytical intent into a minimal query DSL plan."], tools=tool_functions, output_schema=AgentPlan)
     critic = Agent(**controls, id="fpa-variance", tool_call_limit=6, name="VarianceAgent", model=model, instructions=[common, "Validate bridge and plan-versus-actual requests; do not explain unexecuted numbers."], tools=tool_functions, output_schema=AgentPlan)
     planner = Agent(**controls, id="fpa-planning", tool_call_limit=6, name="PlanningAgent", model=model, instructions=[common, "Draft driver expressions only through DRAFT proposals."], tools=tool_functions, output_schema=AgentPlan)

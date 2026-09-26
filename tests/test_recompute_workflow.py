@@ -51,6 +51,8 @@ class World:
     publishable_state: str = "LOCKED"
     commit_fails: bool = False
     compensation_fails: bool = False
+    partition_fails: bool = False
+    discard_fails: bool = False
     successor_state: str = "DRAFT"
     publication_state: str = "RESERVED"
     published_shocks: list = field(default_factory=list)
@@ -140,6 +142,8 @@ def build_activities(world: World) -> list:
     @activity.defn(name="evaluate_partition")
     async def evaluate_partition(payload: PartitionInput) -> PartitionResult:
         world.record("evaluate_partition")
+        if world.partition_fails:
+            raise ApplicationError("partition cannot be computed", type=PERMANENT, non_retryable=True)
         if world.gate is not None:
             await world.gate.wait()
         return PartitionResult(index=payload.partition.index, rows_written=100)
@@ -232,6 +236,8 @@ def build_activities(world: World) -> list:
     @activity.defn(name="discard_staged")
     def discard_staged(plan_version_code: str, revision: int) -> None:
         world.record("discard_staged")
+        if world.discard_fails:
+            raise ApplicationError("cube unavailable", non_retryable=True)
 
     return [
         load_plan_context, snapshot_drivers, committed_shocks, supersede_commitments, reserve_revision,
@@ -505,6 +511,20 @@ async def test_a_failing_compensation_fails_the_run_loudly():
     # A run that could not reconcile the two surfaces must not report success,
     # and the disagreement is written where an operator will find it.
     assert "mark_compensation_failed" in world.calls
+    assert "ended:FAILED" in world.calls
+
+
+async def test_a_failed_discard_does_not_skip_the_rest_of_the_cleanup():
+    world = World(partition_fails=True, discard_fails=True)
+    async with Harness(world) as harness:
+        handle = await harness.start()
+        with pytest.raises(WorkflowFailureError):
+            await handle.result()
+
+    # Each cleanup step stands alone: the discard failing must still leave the
+    # successor closed and the run recorded as FAILED, not RUNNING and DRAFT.
+    assert "discard_staged" in world.calls
+    assert "record_rejection" in world.calls
     assert "ended:FAILED" in world.calls
 
 

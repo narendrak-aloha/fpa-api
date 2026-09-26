@@ -54,9 +54,40 @@ def test_period_predicate_prunes_partitions(cube):
     # The partition key is toYYYYMM(period_month); the plan must show the
     # period condition reaching it, and fewer parts read than exist.
     assert "toYYYYMM(period_month)" in plan
-    minmax = plan.split("Min-Max", 1)[1].split("Parts:", 1)[1].split("\n", 1)[0].strip()
-    selected, total = (int(x) for x in minmax.split("/"))
-    assert selected < total, f"no pruning: read {selected}/{total} parts"
+    indexes = _parts_read_by_index(plan)
+    # ClickHouse spells the min-max index "Min-Max" (26.x) or "MinMax" (24.x);
+    # either, or the partition index, must be there for pruning to be possible.
+    assert {"Min-Max", "MinMax", "Partition"} & set(indexes), f"no partition or min-max index in:\n{plan}"
+    # The indexes prune one after another, so the first one's total is every
+    # part of the table and the last one's selected is what is actually read.
+    names = list(indexes)
+    total, selected = indexes[names[0]][1], indexes[names[-1]][0]
+    assert selected < total, f"no pruning: read {selected}/{total} parts ({indexes})"
+
+
+def _parts_read_by_index(plan: str) -> dict[str, tuple[int, int]]:
+    """``{index name: (parts selected, parts total)}`` from EXPLAIN indexes=1, in plan order.
+
+    Only the ``Indexes:`` block counts: each index is a header line
+    (``Min-Max``, ``Partition``, ``PrimaryKey``) followed by indented
+    ``Keys:``, ``Condition:`` and ``Parts: n/m`` lines.
+    """
+    found: dict[str, tuple[int, int]] = {}
+    header_indent, current = None, None
+    for raw in plan.splitlines():
+        line = raw.strip()
+        indent = len(raw) - len(raw.lstrip())
+        if line == "Indexes:":
+            # Index names sit one level in; their keys sit deeper still
+            header_indent = indent + 2
+        elif header_indent is None:
+            continue
+        elif indent == header_indent and ":" not in line:
+            current = line
+        elif line.startswith("Parts:") and "/" in line and current and current not in found:
+            selected, total = line.split(":", 1)[1].strip().split("/")
+            found[current] = (int(selected), int(total))
+    return found
 
 
 def test_as_of_reads_the_books_as_that_close_saw_them(cube):

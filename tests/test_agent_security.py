@@ -90,6 +90,17 @@ def test_classification_failure_blocks_tool_output(boundary):
         boundary.tool("run_finops_query", lambda: {"unclassified": object()}, {}, context())
 
 
+def test_a_delegation_stream_passes_but_any_other_generator_is_blocked(boundary):
+    stream = (event for event in ["member says hello"])
+    # The member's run is guarded on its own; its stream is not tool data
+    assert boundary.tool("delegate_task_to_member", lambda **_: stream, {"member_id": "fpa-query", "task": "t"}, context()) is stream
+    with pytest.raises(InputCheckError):
+        boundary.tool("list_metrics", lambda: (m for m in ["services_revenue"]), {}, context())
+    # Delegation still needs the caller's scope
+    with pytest.raises(InputCheckError):
+        boundary.tool("delegate_task_to_member", lambda **_: stream, {}, RunContext(run_id="x", session_id="y"))
+
+
 def test_real_agno_member_requires_scope_and_runs_hooks():
     from agno.models.base import Model
     from agno.models.response import ModelResponse
